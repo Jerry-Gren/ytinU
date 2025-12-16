@@ -8,9 +8,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(SOURCE_PATH ${CMAKE_SOURCE_DIR}/src)
 set(THIRD_PARTY_LIBRARY_PATH ${CMAKE_SOURCE_DIR}/external)
 
-# Copy data files into the build folder
-file(COPY "media/" DESTINATION "media")
-
 # Compile third party libraries
 add_subdirectory(${THIRD_PARTY_LIBRARY_PATH}/glad)
 add_subdirectory(${THIRD_PARTY_LIBRARY_PATH}/glfw)
@@ -56,22 +53,34 @@ file(GLOB PROJECT_SRC ${SOURCE_PATH}/*.cpp)
 # temp
 file(GLOB ENGINE_HDR ${SOURCE_PATH}/engine/*.h)
 file(GLOB ENGINE_SRC ${SOURCE_PATH}/engine/*.cpp)
+file(GLOB EDITOR_HDR ${SOURCE_PATH}/editor/*.h)
+file(GLOB EDITOR_SRC ${SOURCE_PATH}/editor/*.cpp)
 
 # Generate program
-add_executable(final_project ${BASE_HDR} ${BASE_SRC} ${PROJECT_HDR} ${PROJECT_SRC} ${ENGINE_HDR} ${ENGINE_SRC})
+add_executable(final_project ${BASE_HDR} ${BASE_SRC} ${PROJECT_HDR} ${PROJECT_SRC} ${ENGINE_HDR} ${ENGINE_SRC} ${EDITOR_HDR} ${EDITOR_SRC})
 
 if(WIN32)
     set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    set(EXECUTABLE_OUTPUT_PATH "${CMAKE_BINARY_DIR}/bin")
 elseif(UNIX)
 if(CMAKE_BUILD_TYPE MATCHES Debug)
     set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/Debug")
+    set(EXECUTABLE_OUTPUT_PATH "${CMAKE_BINARY_DIR}/bin/Debug")
 else()
     set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/Release")
+    set(EXECUTABLE_OUTPUT_PATH "${CMAKE_BINARY_DIR}/bin/Release")
 endif()
 endif()
+
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_SOURCE_DIR}/media"
+    "${EXECUTABLE_OUTPUT_PATH}/media"
+    COMMENT "Copying media assets to binary directory..."
+)
 
 # Include third party header files
 target_include_directories(

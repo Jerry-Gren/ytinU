@@ -26,7 +26,8 @@ public:
     // targetFBO: 传入 0 渲染到屏幕，传入 FBO ID 渲染到纹理
     // selectedObj: 如果非空，则绘制描边 (Editor 模式用)
     void render(const Scene& scene, Camera* camera, 
-                GLuint targetFBO, int width, int height, 
+                GLuint targetFBO, int width, int height,
+                float contentScale, 
                 GameObject* selectedObj = nullptr);
 
 private:

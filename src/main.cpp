@@ -1,7 +1,12 @@
 #include <cstdlib>
 #include <iostream>
+#include <filesystem>
 
 #include "scene_roaming.h"
+
+std::string getExecutableDir() {
+    return std::filesystem::current_path().string(); 
+}
 
 Options getOptions(int argc, char* argv[]) {
     Options options;
@@ -13,7 +18,12 @@ Options getOptions(int argc, char* argv[]) {
     options.msaa = true;
     options.glVersion = {3, 3};
     options.backgroundColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
-    options.assetRootDir = "../../media/";
+
+    std::string exeDir = getExecutableDir();
+    std::filesystem::path assetPath = std::filesystem::path(exeDir) / "media";
+    options.assetRootDir = assetPath.string() + "/";
+
+    std::cout << "[Info] Asset Root: " << options.assetRootDir << std::endl;
 
     return options;
 }

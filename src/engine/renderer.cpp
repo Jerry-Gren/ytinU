@@ -404,6 +404,7 @@ void Renderer::onResize(int width, int height) {
 
 void Renderer::render(const Scene& scene, Camera* camera, 
                       GLuint targetFBO, int width, int height, 
+                      float contentScale,
                       GameObject* selectedObj)
 {
     // 1. 绑定目标 FBO
@@ -432,10 +433,7 @@ void Renderer::render(const Scene& scene, Camera* camera,
     // --- Pass 3: 描边 ---
     if (selectedObj) {
         // OutlinePass 需要传入宽高用于重新生成纹理
-        // 注意：这里需要计算 contentScale，为了简单，我们可以暂时传 1.0f
-        // 或者在 render 接口加一个 scale 参数
-        float scale = 1.0f; 
-        _outlinePass->render(selectedObj, camera, scale, width, height);
+        _outlinePass->render(selectedObj, camera, contentScale, width, height);
         
         // 恢复 FBO 绑定 (防止 OutlinePass 内部解绑)
         glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
