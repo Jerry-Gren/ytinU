@@ -1,0 +1,7 @@
+## Build
+
+cmake -Bbuild . -DCMAKE_EXPORT_COMPILE_COMMANDS=1 -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+cd build
+
+make
