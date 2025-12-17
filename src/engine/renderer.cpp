@@ -97,6 +97,7 @@ void Renderer::init() {
         #define NR_SPOT_LIGHTS 4
 
         uniform bool isUnlit;
+        uniform bool isDoubleSided;
 
         uniform vec3 viewPos;
         uniform Material material;
@@ -121,9 +122,11 @@ void Renderer::init() {
 		vec3 getNormal() {
             // 归一化插值后的法线
             vec3 n = normalize(Normal);
-            // gl_FrontFacing 是内置变量：如果是正面为 true，背面为 false
-            if (!gl_FrontFacing) {
-                n = -n; // 如果是背面，把法线反过来
+            // 只有当物体明确开启了双面渲染(isDoubleSided == true)，
+            // 并且我们正在渲染背面(!gl_FrontFacing)时，才反转法线。
+            // 对于普通的球体/立方体，这段逻辑将被跳过，从而避免了 macOS 上的误判问题。
+            if (isDoubleSided && !gl_FrontFacing) {
+                n = -n; 
             }
             return n;
         }
@@ -487,6 +490,9 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
     _mainShader->setUniformMat4("view", view);
     _mainShader->setUniformVec3("viewPos", viewPos);
 
+    // Fix for macOS
+    glFrontFace(GL_CCW);
+
     // 1. 收集光源 (Lighting Loop)
     int dirCount = 0, pointCount = 0, spotCount = 0;
     
@@ -562,6 +568,7 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         // }
         
         _mainShader->setUniformBool("isUnlit", meshComp->isGizmo);
+        _mainShader->setUniformBool("isDoubleSided", meshComp->doubleSided);
         _mainShader->setUniformVec3("material.ambient", meshComp->material.ambient);
         _mainShader->setUniformVec3("material.diffuse", meshComp->material.diffuse);
         _mainShader->setUniformVec3("material.specular", meshComp->material.specular);
