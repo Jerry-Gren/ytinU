@@ -1,5 +1,6 @@
 #include "resource_manager.h"
 #include <iostream>
+#include <algorithm>
 
 ResourceManager& ResourceManager::Get()
 {
@@ -37,33 +38,42 @@ void ResourceManager::scanDirectory(const std::string& rootDir)
 {
     _fileList.clear();
     namespace fs = std::filesystem;
-    if (!fs::exists(rootDir)) return;
+    if (rootDir.empty() || !fs::exists(rootDir) || !fs::is_directory(rootDir)) return;
 
     for (const auto& entry : fs::recursive_directory_iterator(rootDir))
     {
         if (entry.is_regular_file())
         {
             std::string ext = entry.path().extension().string();
-            // 转小写比较...
-            if (ext == ".obj" || ext == ".OBJ")
+            std::transform(ext.begin(), ext.end(), ext.begin(), 
+                           [](unsigned char c){ return std::tolower(c); });
+            if (ext == ".obj")
             {
-                std::string fullPath = entry.path().string();
                 std::string filename = entry.path().filename().string();
                 
-                // [关键] 我们计算相对路径存起来，方便存盘
-                // 这里简单存 filename 也可以，或者 path relative_to root
-                std::string relPath = fs::relative(entry.path(), rootDir).string();
+                std::string storePath;
+                try {
+                    // 尝试计算相对路径
+                    storePath = fs::relative(entry.path(), rootDir).string();
+                } catch (const fs::filesystem_error& e) {
+                    // 如果无法计算相对路径（比如跨盘符），则退化为存储绝对路径
+                    storePath = entry.path().string();
+                }
+                std::replace(storePath.begin(), storePath.end(), '\\', '/');
                 
-                _fileList.push_back({filename, relPath});
+                _fileList.push_back({filename, storePath});
             }
         }
     }
 }
 
-std::shared_ptr<Model> ResourceManager::getModel(const std::string& relPath)
+std::shared_ptr<Model> ResourceManager::getModel(const std::string& pathKey)
 {
+    std::string key = pathKey;
+    std::replace(key.begin(), key.end(), '\\', '/');
+
     // 1. 检查缓存 (Key 是相对路径，比如 "assets/sphere.obj")
-    auto it = _modelCache.find(relPath);
+    auto it = _modelCache.find(key);
     if (it != _modelCache.end())
     {
         return it->second;
@@ -71,7 +81,12 @@ std::shared_ptr<Model> ResourceManager::getModel(const std::string& relPath)
 
     // 2. 缓存未命中，准备加载
     // [核心修复] 获取硬盘上的绝对路径
-    std::string fullPath = getFullPath(relPath);
+    std::string fullPath = getFullPath(key);
+
+    if (!std::filesystem::exists(fullPath)) {
+        std::cerr << "[ResourceManager] Error: File not found: " << fullPath << std::endl;
+        return nullptr; // 或者返回一个紫黑格子的 "ErrorModel"
+    }
 
     // [调试] 打印一下路径，确认拼对了吗
     // std::cout << "Loading Model: " << fullPath << std::endl;
@@ -81,12 +96,12 @@ std::shared_ptr<Model> ResourceManager::getModel(const std::string& relPath)
         std::shared_ptr<Model> newModel = std::make_shared<Model>(fullPath);
         
         // 4. 存入缓存 (Key 依然是【相对路径】，方便下次查找)
-        _modelCache[relPath] = newModel; 
+        _modelCache[key] = newModel;
         
         return newModel;
     }
     catch (std::exception& e) {
-        std::cerr << "ResourceManager Failed: " << e.what() << std::endl;
+        std::cerr << "[ResourceManager] Failed to load model: " << e.what() << std::endl;
         return nullptr;
     }
 }

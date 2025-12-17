@@ -1,0 +1,4734 @@
+./geometry_factory.cpp:
+```
+#include "geometry_factory.h"
+#include <cmath>
+
+// 辅助函数：添加四边形面 (由两个三角形组成)
+static void addQuad(std::vector<Vertex> &vertices, std::vector<uint32_t> &indices,
+                    const Vertex &v0, const Vertex &v1, const Vertex &v2, const Vertex &v3)
+{
+    // 两个三角形: 0-1-2 和 0-2-3
+    uint32_t baseIndex = static_cast<uint32_t>(vertices.size());
+    vertices.push_back(v0);
+    vertices.push_back(v1);
+    vertices.push_back(v2);
+    vertices.push_back(v3);
+
+    indices.push_back(baseIndex + 0);
+    indices.push_back(baseIndex + 1);
+    indices.push_back(baseIndex + 2);
+
+    indices.push_back(baseIndex + 0);
+    indices.push_back(baseIndex + 2);
+    indices.push_back(baseIndex + 3);
+}
+
+std::shared_ptr<Model> GeometryFactory::createFrustum(float topRadius, float bottomRadius, float height, int slices)
+{
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+
+    float halfH = height / 2.0f;
+
+    // ==========================================
+    // 1. 生成侧面 (Side)
+    // ==========================================
+    // 我们需要多生成一个点来闭合纹理坐标 (0.0 -> 1.0)
+    for (int i = 0; i <= slices; ++i)
+    {
+        float u = (float)i / (float)slices;
+        float theta = u * 2.0f * glm::pi<float>();
+
+        float cosTheta = cos(theta);
+        float sinTheta = sin(theta);
+
+        // 顶点位置
+        glm::vec3 topPos(cosTheta * topRadius, halfH, sinTheta * topRadius);
+        glm::vec3 bottomPos(cosTheta * bottomRadius, -halfH, sinTheta * bottomRadius);
+
+        // 法线计算 (侧面法线)
+        // 简单起见，我们假设侧面法线是水平的 (对于圆柱是完美的，对于圆锥略有误差但视觉可接受)
+        // 如果要严谨的圆台法线，需要计算斜率，这里暂取水平方向
+        glm::vec3 normal = glm::vec3(cosTheta, 0.0f, sinTheta);
+
+        // 如果是棱柱/棱台（sides较少），通常需要 Flat Shading（每个面独立顶点），
+        // 但为了代码简洁，这里使用 Smooth Shading（共用顶点）。
+        // 如果觉得棱柱看起来太圆滑，可以后续改为每个面独立生成顶点。
+
+        vertices.push_back(Vertex(bottomPos, normal, glm::vec2(u, 0.0f))); // 偶数索引
+        vertices.push_back(Vertex(topPos, normal, glm::vec2(u, 1.0f)));    // 奇数索引
+    }
+
+    // 侧面索引生成 (Triangle Strip 逻辑转为 Triangles)
+    for (int i = 0; i < slices; ++i)
+    {
+        // 当前列的两个顶点索引
+        int currentBottom = i * 2;
+        int currentTop = currentBottom + 1;
+        // 下一列的两个顶点索引
+        int nextBottom = currentBottom + 2;
+        int nextTop = currentTop + 2;
+
+        // 三角形 1
+        indices.push_back(currentBottom);
+        indices.push_back(currentTop);
+        indices.push_back(nextBottom);
+
+        // 三角形 2
+        indices.push_back(currentTop);
+        indices.push_back(nextTop);
+        indices.push_back(nextBottom);
+    }
+
+    // ==========================================
+    // 2. 生成顶盖 (Top Cap) - 如果半径 > 0
+    // ==========================================
+    if (topRadius > 1e-6)
+    {
+        uint32_t centerIndex = static_cast<uint32_t>(vertices.size());
+
+        // 中心点
+        vertices.push_back(Vertex(glm::vec3(0, halfH, 0), glm::vec3(0, 1, 0), glm::vec2(0.5f, 0.5f)));
+
+        // 圆环点
+        for (int i = 0; i <= slices; ++i)
+        {
+            float u = (float)i / (float)slices;
+            float theta = u * 2.0f * glm::pi<float>();
+            float x = cos(theta) * topRadius;
+            float z = sin(theta) * topRadius;
+
+            // 纹理坐标简单映射
+            float uMap = (cos(theta) * 0.5f) + 0.5f;
+            float vMap = (sin(theta) * 0.5f) + 0.5f;
+
+            vertices.push_back(Vertex(glm::vec3(x, halfH, z), glm::vec3(0, 1, 0), glm::vec2(uMap, vMap)));
+        }
+
+        // 索引 (Triangle Fan)
+        for (int i = 0; i < slices; ++i)
+        {
+            indices.push_back(centerIndex);
+            indices.push_back(centerIndex + 1 + i + 1); // 下一点
+            indices.push_back(centerIndex + 1 + i);     // 当前点
+        }
+    }
+
+    // ==========================================
+    // 3. 生成底盖 (Bottom Cap) - 如果半径 > 0
+    // ==========================================
+    if (bottomRadius > 1e-6)
+    {
+        uint32_t centerIndex = static_cast<uint32_t>(vertices.size());
+
+        // 中心点
+        vertices.push_back(Vertex(glm::vec3(0, -halfH, 0), glm::vec3(0, -1, 0), glm::vec2(0.5f, 0.5f)));
+
+        // 圆环点
+        for (int i = 0; i <= slices; ++i)
+        {
+            float u = (float)i / (float)slices;
+            float theta = u * 2.0f * glm::pi<float>();
+            float x = cos(theta) * bottomRadius;
+            float z = sin(theta) * bottomRadius;
+
+            float uMap = (cos(theta) * 0.5f) + 0.5f;
+            float vMap = (sin(theta) * 0.5f) + 0.5f;
+
+            vertices.push_back(Vertex(glm::vec3(x, -halfH, z), glm::vec3(0, -1, 0), glm::vec2(uMap, vMap)));
+        }
+
+        // 索引 (Triangle Fan) - 注意顺序相反以保持逆时针
+        for (int i = 0; i < slices; ++i)
+        {
+            indices.push_back(centerIndex);
+            indices.push_back(centerIndex + 1 + i);     // 当前点
+            indices.push_back(centerIndex + 1 + i + 1); // 下一点
+        }
+    }
+
+    return std::make_unique<Model>(vertices, indices);
+}
+
+std::shared_ptr<Model> GeometryFactory::createCube(float size)
+{
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+    float h = size / 2.0f;
+
+    // 前面 (Normal +Z)
+    addQuad(vertices, indices,
+            Vertex{glm::vec3(-h, -h, h), glm::vec3(0, 0, 1), glm::vec2(0, 0)},
+            Vertex{glm::vec3(h, -h, h), glm::vec3(0, 0, 1), glm::vec2(1, 0)},
+            Vertex{glm::vec3(h, h, h), glm::vec3(0, 0, 1), glm::vec2(1, 1)},
+            Vertex{glm::vec3(-h, h, h), glm::vec3(0, 0, 1), glm::vec2(0, 1)});
+    // 后面 (Normal -Z)
+    addQuad(vertices, indices,
+            Vertex{glm::vec3(h, -h, -h), glm::vec3(0, 0, -1), glm::vec2(0, 0)},
+            Vertex{glm::vec3(-h, -h, -h), glm::vec3(0, 0, -1), glm::vec2(1, 0)},
+            Vertex{glm::vec3(-h, h, -h), glm::vec3(0, 0, -1), glm::vec2(1, 1)},
+            Vertex{glm::vec3(h, h, -h), glm::vec3(0, 0, -1), glm::vec2(0, 1)});
+    // 左面 (Normal -X)
+    addQuad(vertices, indices,
+            Vertex{glm::vec3(-h, -h, -h), glm::vec3(-1, 0, 0), glm::vec2(0, 0)},
+            Vertex{glm::vec3(-h, -h, h), glm::vec3(-1, 0, 0), glm::vec2(1, 0)},
+            Vertex{glm::vec3(-h, h, h), glm::vec3(-1, 0, 0), glm::vec2(1, 1)},
+            Vertex{glm::vec3(-h, h, -h), glm::vec3(-1, 0, 0), glm::vec2(0, 1)});
+    // 右面 (Normal +X)
+    addQuad(vertices, indices,
+            Vertex{glm::vec3(h, -h, h), glm::vec3(1, 0, 0), glm::vec2(0, 0)},
+            Vertex{glm::vec3(h, -h, -h), glm::vec3(1, 0, 0), glm::vec2(1, 0)},
+            Vertex{glm::vec3(h, h, -h), glm::vec3(1, 0, 0), glm::vec2(1, 1)},
+            Vertex{glm::vec3(h, h, h), glm::vec3(1, 0, 0), glm::vec2(0, 1)});
+    // 上面 (Normal +Y)
+    addQuad(vertices, indices,
+            Vertex{glm::vec3(-h, h, h), glm::vec3(0, 1, 0), glm::vec2(0, 0)},
+            Vertex{glm::vec3(h, h, h), glm::vec3(0, 1, 0), glm::vec2(1, 0)},
+            Vertex{glm::vec3(h, h, -h), glm::vec3(0, 1, 0), glm::vec2(1, 1)},
+            Vertex{glm::vec3(-h, h, -h), glm::vec3(0, 1, 0), glm::vec2(0, 1)});
+    // 下面 (Normal -Y)
+    addQuad(vertices, indices,
+            Vertex{glm::vec3(-h, -h, -h), glm::vec3(0, -1, 0), glm::vec2(0, 0)},
+            Vertex{glm::vec3(h, -h, -h), glm::vec3(0, -1, 0), glm::vec2(1, 0)},
+            Vertex{glm::vec3(h, -h, h), glm::vec3(0, -1, 0), glm::vec2(1, 1)},
+            Vertex{glm::vec3(-h, -h, h), glm::vec3(0, -1, 0), glm::vec2(0, 1)});
+
+    return std::make_unique<Model>(vertices, indices);
+}
+
+std::shared_ptr<Model> GeometryFactory::createPlane(float width, float depth)
+{
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+    float w = width / 2.0f;
+    float d = depth / 2.0f;
+
+    // 一个向上平铺的大矩形
+    addQuad(vertices, indices,
+            Vertex{glm::vec3(-w, 0, d), glm::vec3(0, 1, 0), glm::vec2(0, 0)},         // 左下
+            Vertex{glm::vec3(w, 0, d), glm::vec3(0, 1, 0), glm::vec2(width, 0)},      // 右下 (UV重复)
+            Vertex{glm::vec3(w, 0, -d), glm::vec3(0, 1, 0), glm::vec2(width, depth)}, // 右上
+            Vertex{glm::vec3(-w, 0, -d), glm::vec3(0, 1, 0), glm::vec2(0, depth)}     // 左上
+    );
+
+    return std::make_unique<Model>(vertices, indices);
+}
+
+std::shared_ptr<Model> GeometryFactory::createSphere(float radius, int stacks, int slices)
+{
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+
+    for (int i = 0; i <= stacks; ++i)
+    {
+        float v = (float)i / (float)stacks;
+        float phi = v * glm::pi<float>();
+
+        for (int j = 0; j <= slices; ++j)
+        {
+            float u = (float)j / (float)slices;
+            float theta = u * 2.0f * glm::pi<float>();
+
+            float x = cos(theta) * sin(phi);
+            float y = cos(phi);
+            float z = sin(theta) * sin(phi);
+
+            glm::vec3 pos = glm::vec3(x, y, z) * radius;
+            glm::vec3 normal = glm::vec3(x, y, z);
+            glm::vec2 uv = glm::vec2(u, v);
+
+            vertices.push_back(Vertex(pos, normal, uv));
+        }
+    }
+
+    for (int i = 0; i < stacks; ++i)
+    {
+        for (int j = 0; j < slices; ++j)
+        {
+            int first = (i * (slices + 1)) + j;
+            int second = first + slices + 1;
+
+            indices.push_back(first);
+            indices.push_back(first + 1);
+            indices.push_back(second);
+
+            indices.push_back(second);
+            indices.push_back(first + 1);
+            indices.push_back(second + 1);
+        }
+    }
+
+    return std::make_unique<Model>(vertices, indices);
+}
+
+std::shared_ptr<Model> GeometryFactory::createCylinder(float radius, float height, int slices)
+{
+    return createFrustum(radius, radius, height, slices);
+}
+
+std::shared_ptr<Model> GeometryFactory::createCone(float radius, float height, int slices)
+{
+    return createFrustum(0.0f, radius, height, slices);
+}
+
+std::shared_ptr<Model> GeometryFactory::createPrism(float radius, float height, int sides)
+{
+    // 棱柱本质上就是 slices 很少的圆柱
+    return createFrustum(radius, radius, height, sides);
+}
+
+std::shared_ptr<Model> GeometryFactory::createPyramidFrustum(float topRadius, float bottomRadius, float height, int sides)
+{
+    // 棱台本质上就是 slices 很少的圆台
+    return createFrustum(topRadius, bottomRadius, height, sides);
+}
+```
+
+./geometry_factory.h:
+```
+#pragma once
+
+#include <vector>
+#include <memory>
+#include "base/vertex.h"
+#include "model.h" // 我们需要返回 Model 对象
+
+class GeometryFactory
+{
+public:
+    // 1. 立方体 (用于墙壁、地板、箱子)
+    static std::shared_ptr<Model> createCube(float size = 1.0f);
+
+    // 5. 平面 (专门用于地板，虽然可以用压扁的立方体代替，但单面更高效)
+    static std::shared_ptr<Model> createPlane(float width = 10.0f, float depth = 10.0f);
+
+    // 2. 球体 (用于装饰、测试光照)
+    // stacks: 纬度切片数, slices: 经度切片数 (越高越圆)
+    static std::shared_ptr<Model> createSphere(float radius = 0.5f, int stacks = 16, int slices = 32);
+
+    // -----------------------------------------------------------------------
+    // 通用几何生成核心 (Frustum)
+    // -----------------------------------------------------------------------
+    // 这是一个万能函数：
+    // - topRadius == bottomRadius, slices > 20 -> 圆柱
+    // - topRadius == 0                         -> 圆锥
+    // - topRadius != bottomRadius              -> 圆台
+    // - slices == 3, 4, 5, 6...                -> 三棱柱/台, 四棱柱/台...
+    static std::shared_ptr<Model> createFrustum(float topRadius, float bottomRadius, float height, int slices);
+
+    // 4. 圆柱体 (Cylinder) - 实际上是调用 createFrustum
+    static std::shared_ptr<Model> createCylinder(float radius = 0.5f, float height = 1.0f, int slices = 32);
+
+    // 5. 圆锥体 (Cone) - 实际上是调用 createFrustum
+    static std::shared_ptr<Model> createCone(float radius = 0.5f, float height = 1.0f, int slices = 32);
+
+    // 6. 多面棱柱 (Prism) - 比如六棱柱: radius=1, slices=6
+    static std::shared_ptr<Model> createPrism(float radius = 0.5f, float height = 1.0f, int sides = 6);
+
+    // 7. 多面棱台 (Prism Frustum) - 比如四棱台: topR=0.5, bottomR=1, slices=4
+    static std::shared_ptr<Model> createPyramidFrustum(float topRadius, float bottomRadius, float height, int sides = 4);
+};
+```
+
+./light_structs.h:
+```
+#pragma once
+#include <glm/glm.hpp>
+
+// 材质属性
+struct Material
+{
+    glm::vec3 ambient = glm::vec3(0.1f);
+    glm::vec3 diffuse = glm::vec3(0.7f);
+    glm::vec3 specular = glm::vec3(0.5f);
+    float shininess = 32.0f;
+};
+
+// 平行光 (太阳光)
+struct DirLight
+{
+    glm::vec3 direction = glm::vec3(-0.2f, -1.0f, -0.3f);
+    glm::vec3 color = glm::vec3(1.0f); // 包含强度
+    float intensity = 1.0f;
+};
+
+// 点光源 (灯泡)
+struct PointLight
+{
+    glm::vec3 position = glm::vec3(0.0f);
+
+    float constant = 1.0f;
+    float linear = 0.09f;
+    float quadratic = 0.032f;
+
+    glm::vec3 color = glm::vec3(1.0f);
+    float intensity = 1.0f;
+};
+
+// 聚光灯 (手电筒)
+struct SpotLight
+{
+    glm::vec3 position = glm::vec3(0.0f);
+    glm::vec3 direction = glm::vec3(0.0f, -1.0f, 0.0f);
+    float cutOff = glm::cos(glm::radians(12.5f));
+    float outerCutOff = glm::cos(glm::radians(17.5f));
+
+    float constant = 1.0f;
+    float linear = 0.09f;
+    float quadratic = 0.032f;
+
+    glm::vec3 color = glm::vec3(1.0f);
+    float intensity = 1.0f;
+};
+```
+
+./main.cpp:
+```
+#include <cstdlib>
+#include <iostream>
+#include <filesystem>
+
+#include "scene_roaming.h"
+
+std::string getExecutableDir() {
+    return std::filesystem::current_path().string(); 
+}
+
+Options getOptions(int argc, char* argv[]) {
+    Options options;
+    options.windowTitle = "Scene Roaming";
+    options.windowWidth = 1920;
+    options.windowHeight = 1080;
+    options.windowResizable = true;
+    options.vSync = true;
+    options.msaa = true;
+    options.glVersion = {3, 3};
+    options.backgroundColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+
+    std::string exeDir = getExecutableDir();
+    std::filesystem::path assetPath = std::filesystem::path(exeDir) / "media";
+    options.assetRootDir = assetPath.string() + "/";
+
+    std::cout << "[Info] Asset Root: " << options.assetRootDir << std::endl;
+
+    return options;
+}
+
+int main(int argc, char* argv[]) {
+    Options options = getOptions(argc, argv);
+
+    try {
+        SceneRoaming app(options);
+        app.run();
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << std::endl;
+        exit(EXIT_FAILURE);
+    } catch (...) {
+        std::cerr << "Unknown exception" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    return 0;
+}
+```
+
+./mesh.cpp:
+```
+#include "mesh.h"
+
+Mesh::Mesh(std::vector<Vertex> vertices, std::vector<uint32_t> indices)
+    : vertices(std::move(vertices)), indices(std::move(indices)) {
+    setupMesh();
+}
+
+Mesh::~Mesh() {
+    if (_vao) glDeleteVertexArrays(1, &_vao);
+    if (_vbo) glDeleteBuffers(1, &_vbo);
+    if (_ebo) glDeleteBuffers(1, &_ebo);
+}
+
+Mesh::Mesh(Mesh&& other) noexcept {
+    _vao = other._vao;
+    _vbo = other._vbo;
+    _ebo = other._ebo;
+    vertices = std::move(other.vertices);
+    indices = std::move(other.indices);
+
+    other._vao = 0;
+    other._vbo = 0;
+    other._ebo = 0;
+}
+
+Mesh& Mesh::operator=(Mesh&& other) noexcept {
+    if (this != &other) {
+        if (_vao) glDeleteVertexArrays(1, &_vao);
+        if (_vbo) glDeleteBuffers(1, &_vbo);
+        if (_ebo) glDeleteBuffers(1, &_ebo);
+
+        _vao = other._vao;
+        _vbo = other._vbo;
+        _ebo = other._ebo;
+        vertices = std::move(other.vertices);
+        indices = std::move(other.indices);
+
+        other._vao = 0;
+        other._vbo = 0;
+        other._ebo = 0;
+    }
+    return *this;
+}
+
+void Mesh::setupMesh() {
+    glGenVertexArrays(1, &_vao);
+    glGenBuffers(1, &_vbo);
+    glGenBuffers(1, &_ebo);
+
+    glBindVertexArray(_vao);
+
+    // VBO
+    glBindBuffer(GL_ARRAY_BUFFER, _vbo);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), vertices.data(), GL_STATIC_DRAW);
+
+    // EBO
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(uint32_t), indices.data(), GL_STATIC_DRAW);
+
+    // 顶点属性布局 (基于 vertex.h 的结构: pos, normal, texCoord)
+    // 1. Position (location = 0)
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
+
+    // 2. Normal (location = 1)
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, normal));
+
+    // 3. TexCoord (location = 2)
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, texCoord));
+
+    glBindVertexArray(0);
+}
+
+void Mesh::draw(const GLSLProgram& shader) const {
+    // 这里未来可以绑定材质 Texture
+    // if (albedoMap) albedoMap->bind(0);
+    
+    glBindVertexArray(_vao);
+    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+}
+```
+
+./mesh.h:
+```
+#pragma once
+
+#include <vector>
+#include <string>
+#include <memory>
+#include <glad/gl.h>
+#include "base/vertex.h"
+#include "base/glsl_program.h"
+#include "base/texture2d.h" // 假设你有这个类，如果没有可以先注释掉材质部分
+
+class Mesh
+{
+public:
+    // 网格数据
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+
+    // 简单的材质属性（后续可扩展为Material类）
+    // std::shared_ptr<Texture2D> albedoMap;
+
+public:
+    Mesh(std::vector<Vertex> vertices, std::vector<uint32_t> indices);
+    ~Mesh();
+
+    // 禁止拷贝，防止 OpenGL 句柄重复释放
+    Mesh(const Mesh &) = delete;
+    Mesh &operator=(const Mesh &) = delete;
+
+    // 允许移动 (Move Semantics)
+    Mesh(Mesh &&other) noexcept;
+    Mesh &operator=(Mesh &&other) noexcept;
+
+    // 绘制函数
+    void draw(const GLSLProgram &shader) const;
+
+private:
+    GLuint _vao = 0;
+    GLuint _vbo = 0;
+    GLuint _ebo = 0;
+
+    void setupMesh();
+};
+```
+
+./model.cpp:
+```
+#include "model.h"
+#include "obj_loader.h"
+
+#include <algorithm>
+#include <iostream>
+#include <limits>
+
+Model::Model(const std::string &filepath)
+{
+	while (glGetError() != GL_NO_ERROR);
+	
+    // 1. 调用 OBJLoader 获取数据
+    // 这里利用了 C++ 的返回值优化 (RVO)，不会产生不必要的深拷贝
+    MeshData data = OBJLoader::load(filepath);
+
+    // 2. 将数据移动到 Model 的成员变量中
+    _vertices = std::move(data.vertices);
+    _indices = std::move(data.indices);
+
+    // 3. 后续初始化流程保持不变
+    computeBoundingBox();
+    initGLResources();
+    initBoxGLResources();
+
+    GLenum error = glGetError();
+    if (error != GL_NO_ERROR)
+    {
+        cleanup();
+        throw std::runtime_error("OpenGL Error: " + std::to_string(error));
+    }
+}
+
+Model::Model(const std::vector<Vertex> &vertices, const std::vector<uint32_t> &indices)
+    : _vertices(vertices), _indices(indices)
+{
+	while (glGetError() != GL_NO_ERROR);
+
+    computeBoundingBox();
+    initGLResources();
+    initBoxGLResources();
+
+    GLenum error = glGetError();
+    if (error != GL_NO_ERROR)
+    {
+        cleanup();
+        throw std::runtime_error("OpenGL Error: " + std::to_string(error));
+    }
+}
+
+Model::Model(Model &&rhs) noexcept
+    : _vertices(std::move(rhs._vertices)), _indices(std::move(rhs._indices)),
+      _boundingBox(std::move(rhs._boundingBox)), _vao(rhs._vao), _vbo(rhs._vbo), _ebo(rhs._ebo),
+      _boxVao(rhs._boxVao), _boxVbo(rhs._boxVbo), _boxEbo(rhs._boxEbo)
+{
+    rhs._vao = 0;
+    rhs._vbo = 0;
+    rhs._ebo = 0;
+
+    rhs._boxVao = 0;
+    rhs._boxVbo = 0;
+    rhs._boxEbo = 0;
+}
+
+Model::~Model()
+{
+    cleanup();
+}
+
+BoundingBox Model::getBoundingBox() const
+{
+    return _boundingBox;
+}
+
+void Model::draw() const
+{
+    glBindVertexArray(_vao);
+    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(_indices.size()), GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+}
+
+void Model::drawBoundingBox() const
+{
+    glBindVertexArray(_boxVao);
+    glDrawElements(GL_LINES, 24, GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+}
+
+GLuint Model::getVao() const
+{
+    return _vao;
+}
+
+GLuint Model::getBoundingBoxVao() const
+{
+    return _boxVao;
+}
+
+size_t Model::getVertexCount() const
+{
+    return _vertices.size();
+}
+
+size_t Model::getFaceCount() const
+{
+    return _indices.size() / 3;
+}
+
+void Model::initGLResources()
+{
+    // create a vertex array object
+    glGenVertexArrays(1, &_vao);
+    // create a vertex buffer object
+    glGenBuffers(1, &_vbo);
+    // create a element array buffer
+    glGenBuffers(1, &_ebo);
+
+    glBindVertexArray(_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, _vbo);
+    glBufferData(
+        GL_ARRAY_BUFFER, sizeof(Vertex) * _vertices.size(), _vertices.data(), GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _ebo);
+    glBufferData(
+        GL_ELEMENT_ARRAY_BUFFER, _indices.size() * sizeof(uint32_t), _indices.data(),
+        GL_STATIC_DRAW);
+
+    // specify layout, size of a vertex, data type, normalize, sizeof vertex array, offset of the
+    // attribute
+    glVertexAttribPointer(
+        0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, position));
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(
+        1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, normal));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+        2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, texCoord));
+    glEnableVertexAttribArray(2);
+
+    glBindVertexArray(0);
+}
+
+void Model::computeBoundingBox()
+{
+    float minX = std::numeric_limits<float>::max();
+    float minY = std::numeric_limits<float>::max();
+    float minZ = std::numeric_limits<float>::max();
+    float maxX = -std::numeric_limits<float>::max();
+    float maxY = -std::numeric_limits<float>::max();
+    float maxZ = -std::numeric_limits<float>::max();
+
+    for (const auto &v : _vertices)
+    {
+        minX = std::min(v.position.x, minX);
+        minY = std::min(v.position.y, minY);
+        minZ = std::min(v.position.z, minZ);
+        maxX = std::max(v.position.x, maxX);
+        maxY = std::max(v.position.y, maxY);
+        maxZ = std::max(v.position.z, maxZ);
+    }
+
+    _boundingBox.min = glm::vec3(minX, minY, minZ);
+    _boundingBox.max = glm::vec3(maxX, maxY, maxZ);
+
+    // =========================================================
+    // [修复] 防止零厚度导致的射线检测失败
+    // 给极薄的物体（如 Plane, Quad）增加一个微小的厚度 (Epsilon)
+    // =========================================================
+    constexpr float EPSILON = 0.01f;
+
+    if ((_boundingBox.max.x - _boundingBox.min.x) < EPSILON)
+    {
+        _boundingBox.max.x += EPSILON;
+        _boundingBox.min.x -= EPSILON;
+    }
+    if ((_boundingBox.max.y - _boundingBox.min.y) < EPSILON)
+    {
+        _boundingBox.max.y += EPSILON;
+        _boundingBox.min.y -= EPSILON; // 向下加厚一点
+    }
+    if ((_boundingBox.max.z - _boundingBox.min.z) < EPSILON)
+    {
+        _boundingBox.max.z += EPSILON;
+        _boundingBox.min.z -= EPSILON;
+    }
+}
+
+void Model::initBoxGLResources()
+{
+    std::vector<glm::vec3> boxVertices = {
+        glm::vec3(_boundingBox.min.x, _boundingBox.min.y, _boundingBox.min.z),
+        glm::vec3(_boundingBox.max.x, _boundingBox.min.y, _boundingBox.min.z),
+        glm::vec3(_boundingBox.min.x, _boundingBox.max.y, _boundingBox.min.z),
+        glm::vec3(_boundingBox.max.x, _boundingBox.max.y, _boundingBox.min.z),
+        glm::vec3(_boundingBox.min.x, _boundingBox.min.y, _boundingBox.max.z),
+        glm::vec3(_boundingBox.max.x, _boundingBox.min.y, _boundingBox.max.z),
+        glm::vec3(_boundingBox.min.x, _boundingBox.max.y, _boundingBox.max.z),
+        glm::vec3(_boundingBox.max.x, _boundingBox.max.y, _boundingBox.max.z),
+    };
+
+    std::vector<uint32_t> boxIndices = {0, 1, 0, 2, 0, 4, 3, 1, 3, 2, 3, 7,
+                                        5, 4, 5, 1, 5, 7, 6, 4, 6, 7, 6, 2};
+
+    glGenVertexArrays(1, &_boxVao);
+    glGenBuffers(1, &_boxVbo);
+    glGenBuffers(1, &_boxEbo);
+
+    glBindVertexArray(_boxVao);
+    glBindBuffer(GL_ARRAY_BUFFER, _boxVbo);
+    glBufferData(
+        GL_ARRAY_BUFFER, boxVertices.size() * sizeof(glm::vec3), boxVertices.data(),
+        GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _boxEbo);
+    glBufferData(
+        GL_ELEMENT_ARRAY_BUFFER, boxIndices.size() * sizeof(uint32_t), boxIndices.data(),
+        GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), 0);
+    glEnableVertexAttribArray(0);
+
+    glBindVertexArray(0);
+}
+
+void Model::cleanup()
+{
+    if (_boxEbo)
+    {
+        glDeleteBuffers(1, &_boxEbo);
+        _boxEbo = 0;
+    }
+
+    if (_boxVbo)
+    {
+        glDeleteBuffers(1, &_boxVbo);
+        _boxVbo = 0;
+    }
+
+    if (_boxVao)
+    {
+        glDeleteVertexArrays(1, &_boxVao);
+        _boxVao = 0;
+    }
+
+    if (_ebo != 0)
+    {
+        glDeleteBuffers(1, &_ebo);
+        _ebo = 0;
+    }
+
+    if (_vbo != 0)
+    {
+        glDeleteBuffers(1, &_vbo);
+        _vbo = 0;
+    }
+
+    if (_vao != 0)
+    {
+        glDeleteVertexArrays(1, &_vao);
+        _vao = 0;
+    }
+}
+```
+
+./model.h:
+```
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include "base/bounding_box.h"
+#include "base/gl_utility.h"
+#include "base/transform.h"
+#include "base/vertex.h"
+
+class Model
+{
+public:
+    Model(const std::string &filepath);
+
+    Model(const std::vector<Vertex> &vertices, const std::vector<uint32_t> &indices);
+
+    Model(Model &&rhs) noexcept;
+
+    Model(const Model &) = delete;
+    Model &operator=(const Model &) = delete;
+
+    virtual ~Model();
+
+    GLuint getVao() const;
+    GLuint getBoundingBoxVao() const;
+    size_t getVertexCount() const;
+    size_t getFaceCount() const;
+    BoundingBox getBoundingBox() const;
+
+    virtual void draw() const;
+
+    virtual void drawBoundingBox() const;
+
+    const std::vector<uint32_t> &getIndices() const
+    {
+        return _indices;
+    }
+    const std::vector<Vertex> &getVertices() const
+    {
+        return _vertices;
+    }
+    const Vertex &getVertex(int i) const
+    {
+        return _vertices[i];
+    }
+
+public:
+    Transform transform;
+
+protected:
+    // vertices of the table represented in model's own coordinate
+    std::vector<Vertex> _vertices;
+    std::vector<uint32_t> _indices;
+
+    // bounding box
+    BoundingBox _boundingBox;
+
+    // opengl objects
+    GLuint _vao = 0;
+    GLuint _vbo = 0;
+    GLuint _ebo = 0;
+
+    GLuint _boxVao = 0;
+    GLuint _boxVbo = 0;
+    GLuint _boxEbo = 0;
+
+    void computeBoundingBox();
+
+    void initGLResources();
+
+    void initBoxGLResources();
+
+    void cleanup();
+};
+```
+
+./obj_loader.cpp:
+```
+#include "obj_loader.h"
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <unordered_map>
+
+// 辅助函数：将 "1/2/3" 这种字符串分割成索引
+// 返回 {posIndex, texIndex, normIndex}，如果某项缺失返回 -1
+// OBJ 索引从 1 开始，所以我们需要在解析时减 1
+static glm::ivec3 parseFaceIndex(const std::string& token) {
+    glm::ivec3 result(-1);
+    std::string part;
+    std::stringstream ss(token);
+    
+    // 1. Position Index
+    if (std::getline(ss, part, '/')) {
+        if (!part.empty()) result.x = std::stoi(part) - 1;
+    }
+    
+    // 2. TexCoord Index
+    if (std::getline(ss, part, '/')) {
+        if (!part.empty()) result.y = std::stoi(part) - 1;
+    }
+
+    // 3. Normal Index
+    if (std::getline(ss, part, '/')) {
+        if (!part.empty()) result.z = std::stoi(part) - 1;
+    }
+
+    return result;
+}
+
+MeshData OBJLoader::load(const std::string& filepath) {
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        // 抛出异常供 Model 捕获，或者打印错误并返回空数据
+        throw std::runtime_error("Failed to open OBJ file: " + filepath);
+    }
+
+    // 临时存储原始数据
+    std::vector<glm::vec3> temp_positions;
+    std::vector<glm::vec3> temp_normals;
+    std::vector<glm::vec2> temp_texCoords;
+
+    MeshData meshData; // 最终返回的数据
+
+    // 顶点去重 Map
+    std::unordered_map<Vertex, uint32_t> uniqueVertices;
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty()) continue;
+
+        std::stringstream ss(line);
+        std::string type;
+        ss >> type;
+
+        if (type == "v") {
+            glm::vec3 v;
+            ss >> v.x >> v.y >> v.z;
+            temp_positions.push_back(v);
+        }
+        else if (type == "vn") {
+            glm::vec3 vn;
+            ss >> vn.x >> vn.y >> vn.z;
+            temp_normals.push_back(vn);
+        }
+        else if (type == "vt") {
+            glm::vec2 vt;
+            ss >> vt.x >> vt.y;
+            temp_texCoords.push_back(vt);
+        }
+        else if (type == "f") {
+            std::string token;
+            std::vector<Vertex> faceVertices;
+
+            // 读取面数据
+            while (ss >> token) {
+                glm::ivec3 indices = parseFaceIndex(token);
+                Vertex currentVertex;
+                
+                // Position
+                if (indices.x >= 0 && indices.x < temp_positions.size())
+                    currentVertex.position = temp_positions[indices.x];
+
+                // TexCoord
+                if (indices.y >= 0 && indices.y < temp_texCoords.size())
+                    currentVertex.texCoord = temp_texCoords[indices.y];
+                else
+                    currentVertex.texCoord = glm::vec2(0.0f);
+
+                // Normal
+                if (indices.z >= 0 && indices.z < temp_normals.size())
+                    currentVertex.normal = temp_normals[indices.z];
+                else
+                    currentVertex.normal = glm::vec3(0.0f);
+
+                faceVertices.push_back(currentVertex);
+            }
+
+            // 三角化 (Triangle Fan)
+            // 将多边形分解为三角形
+            if (faceVertices.size() >= 3) {
+                for (size_t i = 1; i < faceVertices.size() - 1; ++i) {
+                    Vertex triVerts[3] = {faceVertices[0], faceVertices[i], faceVertices[i+1]};
+
+                    for (int k = 0; k < 3; ++k) {
+                        if (uniqueVertices.count(triVerts[k]) == 0) {
+                            uniqueVertices[triVerts[k]] = static_cast<uint32_t>(meshData.vertices.size());
+                            meshData.vertices.push_back(triVerts[k]);
+                        }
+                        meshData.indices.push_back(uniqueVertices[triVerts[k]]);
+                    }
+                }
+            }
+        }
+    }
+
+    // 自动计算法线（如果 OBJ 文件里完全没有法线信息）
+    if (temp_normals.empty()) {
+        for (size_t i = 0; i < meshData.indices.size(); i += 3) {
+            Vertex& v0 = meshData.vertices[meshData.indices[i]];
+            Vertex& v1 = meshData.vertices[meshData.indices[i+1]];
+            Vertex& v2 = meshData.vertices[meshData.indices[i+2]];
+
+            glm::vec3 edge1 = v1.position - v0.position;
+            glm::vec3 edge2 = v2.position - v0.position;
+            glm::vec3 normal = glm::normalize(glm::cross(edge1, edge2));
+
+            v0.normal = normal;
+            v1.normal = normal;
+            v2.normal = normal;
+        }
+    }
+
+    std::cout << "Loaded OBJ: " << filepath << "\n" 
+              << "  Vertices: " << meshData.vertices.size() << "\n" 
+              << "  Indices: " << meshData.indices.size() << std::endl;
+
+    return meshData;
+}
+```
+
+./obj_loader.h:
+```
+#pragma once
+
+#include <string>
+#include <vector>
+#include "base/vertex.h"
+
+// 定义一个中间结构体，用于在 Loader 和 Model 之间传递数据
+struct MeshData {
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+};
+
+class OBJLoader {
+public:
+    // 修改返回类型为 MeshData
+    // 如果加载失败，选择抛出异常，或者返回空的 MeshData（根据你的错误处理策略）
+    static MeshData load(const std::string& filepath);
+};
+```
+
+./outline_pass.cpp:
+```
+#include "outline_pass.h"
+#include <vector>
+
+OutlinePass::OutlinePass(int width, int height)
+    : _screenWidth(width), _screenHeight(height)
+{
+    initShaders();
+    initQuad();
+    initFrameBuffer();
+}
+
+OutlinePass::~OutlinePass()
+{
+    if (_fbo)
+        glDeleteFramebuffers(1, &_fbo);
+    if (_maskTexture)
+        glDeleteTextures(1, &_maskTexture);
+    // if (_depthRenderBuffer)
+    //     glDeleteRenderbuffers(1, &_depthRenderBuffer);
+    // [新增] 释放 MSAA 资源
+    if (_msaaFbo)
+        glDeleteFramebuffers(1, &_msaaFbo);
+    if (_msaaColorBuffer)
+        glDeleteRenderbuffers(1, &_msaaColorBuffer);
+    if (_msaaDepthBuffer)
+        glDeleteRenderbuffers(1, &_msaaDepthBuffer);
+    if (_quadVAO)
+        glDeleteVertexArrays(1, &_quadVAO);
+    if (_quadVBO)
+        glDeleteBuffers(1, &_quadVBO);
+}
+
+void OutlinePass::onResize(int width, int height)
+{
+    _screenWidth = width;
+    _screenHeight = height;
+    // 重新生成 FBO (简单粗暴的方法是删了重建)
+    if (_fbo)
+        glDeleteFramebuffers(1, &_fbo);
+    if (_maskTexture)
+        glDeleteTextures(1, &_maskTexture);
+    // if (_depthRenderBuffer)
+    //     glDeleteRenderbuffers(1, &_depthRenderBuffer);
+    // [新增]
+    if (_msaaFbo)
+        glDeleteFramebuffers(1, &_msaaFbo);
+    if (_msaaColorBuffer)
+        glDeleteRenderbuffers(1, &_msaaColorBuffer);
+    if (_msaaDepthBuffer)
+        glDeleteRenderbuffers(1, &_msaaDepthBuffer);
+    
+    initFrameBuffer();
+}
+
+void OutlinePass::initFrameBuffer()
+{
+    GLint maxSamples;
+    glGetIntegerv(GL_MAX_SAMPLES, &maxSamples);
+    int samples = std::min(4, maxSamples); // 尝试用 4，如果不支持则用最大值
+
+    // ==========================================
+    // 1. 创建 MSAA FBO (渲染目标)
+    // ==========================================
+    glGenFramebuffers(1, &_msaaFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, _msaaFbo);
+
+    // 创建多重采样颜色缓冲 (4 samples)
+    glGenRenderbuffers(1, &_msaaColorBuffer);
+    glBindRenderbuffer(GL_RENDERBUFFER, _msaaColorBuffer);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_R8, _screenWidth, _screenHeight);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, _msaaColorBuffer);
+
+    // 创建多重采样深度缓冲 (必须匹配)
+    glGenRenderbuffers(1, &_msaaDepthBuffer);
+    glBindRenderbuffer(GL_RENDERBUFFER, _msaaDepthBuffer);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH_COMPONENT24, _screenWidth, _screenHeight);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, _msaaDepthBuffer);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        std::cout << "ERROR::FRAMEBUFFER:: MSAA Framebuffer is not complete!" << std::endl;
+
+    // ==========================================
+    // 2. 创建 Resolve FBO (读取目标 - 普通纹理)
+    // ==========================================
+    glGenFramebuffers(1, &_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, _fbo);
+
+    // 创建普通单通道纹理 (GL_LINEAR 很重要)
+    glGenTextures(1, &_maskTexture);
+    glBindTexture(GL_TEXTURE_2D, _maskTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, _screenWidth, _screenHeight, 0, GL_RED, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); // 线性过滤
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, _maskTexture, 0);
+
+    // 这个 FBO 不需要深度缓冲，因为我们只是要把 MSAA 的颜色 Blit 过来
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        std::cout << "ERROR::FRAMEBUFFER:: Resolve Framebuffer is not complete!" << std::endl;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void OutlinePass::initQuad()
+{
+    // 标准的覆盖全屏的 NDC 坐标
+    float quadVertices[] = {
+        // positions   // texCoords
+        -1.0f, 1.0f, 0.0f, 1.0f,
+        -1.0f, -1.0f, 0.0f, 0.0f,
+        1.0f, -1.0f, 1.0f, 0.0f,
+
+        -1.0f, 1.0f, 0.0f, 1.0f,
+        1.0f, -1.0f, 1.0f, 0.0f,
+        1.0f, 1.0f, 1.0f, 1.0f};
+    glGenVertexArrays(1, &_quadVAO);
+    glGenBuffers(1, &_quadVBO);
+    glBindVertexArray(_quadVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, _quadVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), &quadVertices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)(2 * sizeof(float)));
+}
+
+void OutlinePass::initShaders()
+{
+    // 1. Mask Shader: 将物体渲染为纯白色
+    const char *maskVs = R"(
+        #version 330 core
+        layout (location = 0) in vec3 aPos;
+        uniform mat4 model;
+        uniform mat4 view;
+        uniform mat4 projection;
+        void main() {
+            gl_Position = projection * view * model * vec4(aPos, 1.0);
+        }
+    )";
+    const char *maskFs = R"(
+        #version 330 core
+        out vec4 FragColor; // 只写 GL_RED
+        void main() {
+            FragColor = vec4(1.0, 0.0, 0.0, 1.0); // R=1
+        }
+    )";
+    _maskShader.reset(new GLSLProgram);
+    _maskShader->attachVertexShader(maskVs);
+    _maskShader->attachFragmentShader(maskFs);
+    _maskShader->link();
+
+    // 2. Post Shader: 边缘检测
+    const char *postVs = R"(
+        #version 330 core
+        layout (location = 0) in vec2 aPos;
+        layout (location = 1) in vec2 aTexCoords;
+        out vec2 TexCoords;
+        void main() {
+            gl_Position = vec4(aPos.x, aPos.y, 0.0, 1.0); 
+            TexCoords = aTexCoords;
+        }
+    )";
+
+    const char *postFs = R"(
+        #version 330 core
+        out vec4 FragColor;
+        in vec2 TexCoords;
+
+        uniform sampler2D maskTexture;
+        uniform float outlineWidth; 
+        uniform vec3 outlineColor; 
+
+        void main() {
+            vec2 texSize = textureSize(maskTexture, 0);
+            vec2 px = 1.0 / texSize; 
+            
+            // 采样中心
+            float center = texture(maskTexture, TexCoords).r;
+
+            // [修复 1] 移除硬 Discard，改用透明度控制内边缘
+            // 原代码: if (center > 0.8) discard; (导致内圈锯齿)
+            // 新逻辑: 如果 center 很白(物体内部)，我们让 alpha 变 0；
+            // 如果 center 是灰色(物体抗锯齿边缘)，我们让 alpha 慢慢变 0。
+            // 这样轮廓线会平滑地“隐入”物体后面。
+            float innerAlpha = 1.0 - smoothstep(0.5, 0.9, center);
+
+            // 提前优化：如果完全在物体内部，就不需要做昂贵的搜索了
+            if (innerAlpha <= 0.0) discard;
+
+            // 2. 暴力搜索 + [修复 2] 亚像素精度补偿
+            int radius = int(ceil(outlineWidth));
+            float minDistance = 1000.0; 
+
+            for (int x = -radius; x <= radius; x++) {
+                for (int y = -radius; y <= radius; y++) {
+                    
+                    vec2 offset = vec2(x, y) * px;
+                    float neighbor = texture(maskTexture, TexCoords + offset).r;
+
+                    // 只要邻居不是全黑
+                    if (neighbor > 0.01) {
+                        float dist = length(vec2(x, y));
+
+                        // [核心黑科技] 亚像素距离补偿
+                        // 如果 neighbor 是 1.0 (全白)，说明边界在这个像素的更外侧，实际距离更近，减去 0.5
+                        // 如果 neighbor 是 0.1 (很淡)，说明边界在这个像素的内侧，实际距离更远
+                        // 公式：修正后的距离 = 像素中心距离 - (亮度 - 0.5)
+                        // 这样生成的距离场会非常平滑，不再受像素网格限制
+                        float subPixelCorrection = neighbor - 0.5;
+                        dist -= subPixelCorrection;
+
+                        minDistance = min(minDistance, dist);
+                    }
+                }
+            }
+
+            // 3. 渲染逻辑
+            if (minDistance > outlineWidth) discard;
+
+            // 4. 外边缘抗锯齿 (保持不变，这部分逻辑是对的)
+            float outerAlpha = 1.0 - smoothstep(outlineWidth - 1.0, outlineWidth, minDistance);
+            
+            // 5. 最终 Alpha = 外边缘衰减 * 内边缘遮罩
+            float finalAlpha = outerAlpha * innerAlpha;
+
+            // 提升一点实心感 (Gamma校正)
+            finalAlpha = pow(finalAlpha, 0.5);
+
+            if (finalAlpha > 0.01) {
+                FragColor = vec4(outlineColor, finalAlpha);
+            } else {
+                discard;
+            }
+        }
+    )";
+    _postShader.reset(new GLSLProgram);
+    _postShader->attachVertexShader(postVs);
+    _postShader->attachFragmentShader(postFs);
+    _postShader->link();
+}
+
+void OutlinePass::render(GameObject *targetObj, Camera *camera, float contentScale, int width, int height)
+{
+    if (!targetObj)
+        return;
+    
+    // [新增] 1. 保存进入函数时绑定的 FBO (即 _sceneFbo)
+    GLint prevFbo;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+
+    if (width != _screenWidth || height != _screenHeight)
+    {
+        // 调用你现有的 onResize 函数重建 FBO
+        onResize(width, height);
+        
+        // 注意：onResize 里已经更新了 _screenWidth 和 _screenHeight，
+        // 所以下一帧不会重复进入这里。
+    }
+
+    GLint prevViewport[4];
+    glGetIntegerv(GL_VIEWPORT, prevViewport);
+
+    // ===========================================
+    // Pass 1: 渲染到 MSAA FBO (生成高精度 Mask)
+    // ===========================================
+    glBindFramebuffer(GL_FRAMEBUFFER, _msaaFbo); // <--- 改为绑定 MSAA FBO
+    glViewport(0, 0, _screenWidth, _screenHeight);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    _maskShader->use();
+    _maskShader->setUniformMat4("view", camera->getViewMatrix());
+    _maskShader->setUniformMat4("projection", camera->getProjectionMatrix());
+
+    // 遍历该物体的所有 Mesh 组件进行渲染
+    for (const auto &comp : targetObj->components)
+    {
+        if (comp->getType() == ComponentType::MeshRenderer)
+        {
+            auto mesh = static_cast<MeshComponent *>(comp.get());
+            if (!mesh->enabled)
+                continue;
+            // Gizmo 通常不画外框，跳过
+            // if (mesh->isGizmo)
+            //     continue;
+
+            // 计算矩阵
+            glm::mat4 modelMatrix = targetObj->transform.getLocalMatrix();
+            modelMatrix = modelMatrix * mesh->model->transform.getLocalMatrix();
+            _maskShader->setUniformMat4("model", modelMatrix);
+
+			if (mesh->doubleSided) {
+                glDisable(GL_CULL_FACE); // 允许绘制背面到 Mask
+            }
+            mesh->model->draw();
+            if (mesh->doubleSided) {
+                glEnable(GL_CULL_FACE); // 恢复背面剔除
+            }
+        }
+    }
+
+    // ===========================================
+    // Pass 1.5: 将 MSAA Resolve 到普通纹理
+    // ===========================================
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, _msaaFbo); // 源：MSAA
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, _fbo);     // 目标：Texture
+    
+    // 执行 Blit：硬件会自动混合 4 个采样点，生成平滑的边缘 (抗锯齿)
+    glBlitFramebuffer(0, 0, _screenWidth, _screenHeight, 
+                      0, 0, _screenWidth, _screenHeight, 
+                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+    // ===========================================
+    // Pass 2: 边缘检测并叠加 (渲染到屏幕)
+    // ===========================================
+    // [修改] 2. 恢复之前保存的 FBO，而不是绑定 0
+    glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+
+    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+
+    // 重要：我们需要在现有的画面上“叠加”外框，而不是覆盖
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_DEPTH_TEST); // 后处理是一个 2D 贴图，不需要深度测试
+
+    _postShader->use();
+    _postShader->setUniformVec3("outlineColor", glm::vec3(1.0, 0.6, 0.0)); // 橙色
+    _postShader->setUniformFloat("outlineWidth", 3.0f * contentScale);     // 线宽 3
+
+    glBindVertexArray(_quadVAO);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, _maskTexture); // 绑定刚才生成的黑白图
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+
+    // 恢复状态
+    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+}
+```
+
+./outline_pass.h:
+```
+#pragma once
+
+#include <glad/gl.h>
+#include <vector>
+#include <memory>
+#include <iostream>
+
+#include "base/glsl_program.h"
+#include "base/camera.h"
+#include "model.h"
+#include "scene_object.h" // 为了访问 GameObject
+
+class OutlinePass
+{
+public:
+    OutlinePass(int screenWidth, int screenHeight);
+    ~OutlinePass();
+
+    // 当窗口大小改变时调用
+    void onResize(int width, int height);
+
+    // 核心渲染函数
+    // 1. targetObj: 当前选中的物体
+    // 2. camera: 当前相机 (需要视图和投影矩阵)
+    void render(GameObject *targetObj, Camera *camera, float contentScale, int width, int height);
+
+private:
+    int _screenWidth, _screenHeight;
+
+    // FBO 相关
+    GLuint _fbo = 0;
+    GLuint _maskTexture = 0;       // 存储黑白遮罩
+    // GLuint _depthRenderBuffer = 0; // 深度缓冲 (即使是遮罩也需要深度测试来保证遮挡关系正确吗？通常做Outline时，我们希望Outline被前面的物体遮挡，所以需要深度)
+
+    // [新增] MSAA FBO (用于渲染 Mask)
+    GLuint _msaaFbo = 0;
+    GLuint _msaaColorBuffer = 0; // 使用 RenderBuffer 而不是 Texture，因为不需要采样
+    GLuint _msaaDepthBuffer = 0; // MSAA 深度缓冲
+
+    // 全屏矩形资源
+    GLuint _quadVAO = 0;
+    GLuint _quadVBO = 0;
+
+    // Shaders
+    std::unique_ptr<GLSLProgram> _maskShader; // 用于把物体画成纯白
+    std::unique_ptr<GLSLProgram> _postShader; // 用于边缘检测和混合
+
+    void initFrameBuffer();
+    void initQuad();
+    void initShaders();
+};
+```
+
+./physics_utils.h:
+```
+#pragma once
+
+#include <glm/glm.hpp>
+#include <algorithm>
+#include <limits>
+#include "base/bounding_box.h" // 你的 base 里应该有这个，如果没有请看 Model 类里的定义
+
+struct Ray
+{
+    glm::vec3 origin;
+    glm::vec3 direction;
+
+    Ray(const glm::vec3 &o, const glm::vec3 &d) : origin(o), direction(d) {}
+};
+
+class PhysicsUtils
+{
+public:
+    // 射线与 AABB (轴对齐包围盒) 的相交检测
+    // 算法：Slab Method
+    // 输入：射线 (ray)，包围盒 (box)
+    // 输出：是否相交，如果相交，tMin 返回交点距离
+    static bool intersectRayAABB(const Ray &ray, const BoundingBox &box, float &tMinResult)
+    {
+        // 防止射线方向为 0 导致的除零异常
+        if (glm::length(ray.direction) < 1e-6f) return false;
+
+        float tMin = 0.0f;
+        float tMax = std::numeric_limits<float>::max();
+
+        glm::vec3 boxMin = box.min;
+        glm::vec3 boxMax = box.max;
+
+        // 对 X, Y, Z 三个轴分别进行检测
+        for (int i = 0; i < 3; i++)
+        {
+            float invD = 1.0f / ray.direction[i];
+            float t0 = (boxMin[i] - ray.origin[i]) * invD;
+            float t1 = (boxMax[i] - ray.origin[i]) * invD;
+
+            if (invD < 0.0f)
+                std::swap(t0, t1);
+
+            tMin = std::max(tMin, t0);
+            tMax = std::min(tMax, t1);
+
+            if (tMax <= tMin)
+                return false;
+        }
+
+        tMinResult = tMin;
+        return true;
+    }
+};
+```
+
+./resource_manager.cpp:
+```
+#include "resource_manager.h"
+#include <iostream>
+
+ResourceManager& ResourceManager::Get()
+{
+    static ResourceManager instance;
+    return instance;
+}
+
+void ResourceManager::setProjectRoot(const std::string& rootPath)
+{
+    _projectRoot = rootPath;
+    
+    // 确保路径以分隔符结尾 (Windows '\' 或 Linux '/')
+    if (!_projectRoot.empty() && _projectRoot.back() != '/' && _projectRoot.back() != '\\') {
+        _projectRoot += "/";
+    }
+
+    // 设置完路径后，立即重新扫描
+    scanDirectory(_projectRoot);
+    
+    // 清空旧缓存 (可选，切换项目时应该清空)
+    _modelCache.clear();
+}
+
+std::string ResourceManager::getFullPath(const std::string& relativePath)
+{
+    // 如果已经是绝对路径，直接返回
+    if (std::filesystem::path(relativePath).is_absolute()) {
+        return relativePath;
+    }
+    return _projectRoot + relativePath;
+}
+
+// scanDirectory 里的逻辑稍微改一下，确保存储的是“相对路径”
+void ResourceManager::scanDirectory(const std::string& rootDir)
+{
+    _fileList.clear();
+    namespace fs = std::filesystem;
+    if (!fs::exists(rootDir)) return;
+
+    for (const auto& entry : fs::recursive_directory_iterator(rootDir))
+    {
+        if (entry.is_regular_file())
+        {
+            std::string ext = entry.path().extension().string();
+            // 转小写比较...
+            if (ext == ".obj" || ext == ".OBJ")
+            {
+                std::string fullPath = entry.path().string();
+                std::string filename = entry.path().filename().string();
+                
+                // [关键] 我们计算相对路径存起来，方便存盘
+                // 这里简单存 filename 也可以，或者 path relative_to root
+                std::string relPath = fs::relative(entry.path(), rootDir).string();
+                
+                _fileList.push_back({filename, relPath});
+            }
+        }
+    }
+}
+
+std::shared_ptr<Model> ResourceManager::getModel(const std::string& relPath)
+{
+    // 1. 检查缓存 (Key 是相对路径，比如 "assets/sphere.obj")
+    auto it = _modelCache.find(relPath);
+    if (it != _modelCache.end())
+    {
+        return it->second;
+    }
+
+    // 2. 缓存未命中，准备加载
+    // [核心修复] 获取硬盘上的绝对路径
+    std::string fullPath = getFullPath(relPath);
+
+    // [调试] 打印一下路径，确认拼对了吗
+    // std::cout << "Loading Model: " << fullPath << std::endl;
+
+    try {
+        // 3. 使用【绝对路径】去打开文件
+        std::shared_ptr<Model> newModel = std::make_shared<Model>(fullPath);
+        
+        // 4. 存入缓存 (Key 依然是【相对路径】，方便下次查找)
+        _modelCache[relPath] = newModel; 
+        
+        return newModel;
+    }
+    catch (std::exception& e) {
+        std::cerr << "ResourceManager Failed: " << e.what() << std::endl;
+        return nullptr;
+    }
+}
+```
+
+./resource_manager.h:
+```
+#pragma once
+
+#include <string>
+#include <unordered_map>
+#include <memory>
+#include <vector>
+#include <filesystem>
+#include "model.h"
+
+class ResourceManager
+{
+public:
+    // 单例访问
+    static ResourceManager& Get();
+
+    // 设置项目根目录 (比如 "D:/MyGraphicsProject/")
+    void setProjectRoot(const std::string& rootPath);
+    
+    // 获取项目根目录
+    std::string getProjectRoot() const { return _projectRoot; }
+
+    // 获取完整路径 (用于加载)
+    std::string getFullPath(const std::string& relativePath);
+
+    // 加载或获取已缓存的模型
+    // path: 相对路径，例如 "obj/bunny.obj"
+    std::shared_ptr<Model> getModel(const std::string& relPath);
+
+    // 扫描资源目录下所有的 .obj 文件 (用于 UI 显示)
+    // rootDir: 资源根目录，例如 "../../media/"
+    void scanDirectory(const std::string& rootDir);
+
+    // 获取扫描到的文件列表 (文件名, 相对路径)
+    const std::vector<std::pair<std::string, std::string>>& getFileList() const { return _fileList; }
+
+    void shutdown() {
+        _modelCache.clear(); // 强制释放所有 Model shared_ptr
+    }
+
+private:
+    ResourceManager() = default;
+
+    std::string _projectRoot = ""; // 默认为空
+
+    // 缓存：key=相对路径, value=模型指针
+    std::unordered_map<std::string, std::shared_ptr<Model>> _modelCache;
+
+    // 扫描到的文件列表
+    std::vector<std::pair<std::string, std::string>> _fileList;
+};
+```
+
+./scene_object.h:
+```
+#pragma once
+
+#include <vector>
+#include <memory>
+#include <string>
+#include <algorithm>
+#include <iostream>
+
+#include "base/transform.h"
+#include "model.h"
+#include "light_structs.h"
+
+enum class MeshShapeType
+{
+    Cube,
+    Sphere,
+    Cylinder,
+    Cone,
+    Prism,   // 多面棱柱
+    Frustum, // 多面棱台
+    Plane,
+    CustomOBJ // 自定义 OBJ 文件
+};
+
+// 定义一个结构体来保存生成参数，防止每次切换丢失
+struct MeshParams
+{
+    // 通用
+    float size = 1.0f;
+    float radius = 0.5f;
+    float height = 1.0f;
+
+    // 平面
+    float width = 10.0f;
+    float depth = 10.0f;
+
+    // 圆柱/球/圆锥
+    int slices = 32;
+    int stacks = 16;
+
+    // 棱柱/棱台
+    float topRadius = 0.5f;
+    float bottomRadius = 1.0f;
+    int sides = 6; // 默认六棱柱
+
+    // OBJ
+    char objPath[256] = "";
+};
+
+// 前置声明
+class GameObject;
+
+// ==========================================
+// 组件类型枚举 (用于运行时识别，替代复杂的 dynamic_cast)
+// ==========================================
+enum class ComponentType
+{
+    MeshRenderer,
+    Light
+};
+
+// ==========================================
+// 1. 组件基类
+// ==========================================
+class Component
+{
+public:
+    GameObject *owner = nullptr;
+    bool enabled = true;
+
+    virtual ~Component() = default;
+
+    // 纯虚函数：获取类型
+    virtual ComponentType getType() const = 0;
+};
+
+// ==========================================
+// 2. 网格渲染组件
+// ==========================================
+class MeshComponent : public Component
+{
+public:
+    std::shared_ptr<Model> model;
+    Material material;
+
+    // 是否是Gizmo (编辑器辅助物体，如灯泡图标)，渲染时不受光照影响
+    bool isGizmo = false;
+    
+    // 是否双面渲染 (默认 false，Plane 需要设为 true)
+    bool doubleSided = false;
+
+    MeshShapeType shapeType = MeshShapeType::Cube;
+    MeshParams params;
+
+    MeshComponent(std::shared_ptr<Model> m, bool gizmo = false)
+        : model(m), isGizmo(gizmo) {}
+
+    ComponentType getType() const override { return ComponentType::MeshRenderer; }
+
+    void setMesh(std::shared_ptr<Model> newModel)
+    {
+        if (newModel) model = newModel; // shared_ptr 赋值会自动处理引用计数
+    }
+};
+
+// ==========================================
+// 3. 光照组件
+// ==========================================
+enum class LightType
+{
+    Directional,
+    Point,
+    Spot
+};
+
+class LightComponent : public Component
+{
+public:
+    LightType type;
+    glm::vec3 color = glm::vec3(1.0f);
+    float intensity = 1.0f;
+
+    // 衰减
+    float constant = 1.0f;
+    float linear = 0.09f;
+    float quadratic = 0.032f;
+
+    // 聚光
+    float cutOff = glm::cos(glm::radians(12.5f));
+    float outerCutOff = glm::cos(glm::radians(17.5f));
+
+    LightComponent(LightType t) : type(t) {}
+
+    ComponentType getType() const override { return ComponentType::Light; }
+};
+
+// ==========================================
+// 4. 游戏对象
+// ==========================================
+class GameObject
+{
+public:
+    std::string name;
+    Transform transform;
+    std::vector<std::unique_ptr<Component>> components;
+
+    GameObject(const std::string &n) : name(n) {}
+
+    template <typename T, typename... Args>
+    T *addComponent(Args &&...args)
+    {
+        auto comp = std::make_unique<T>(std::forward<Args>(args)...);
+        comp->owner = this;
+        T *ptr = comp.get();
+        components.push_back(std::move(comp));
+        return ptr;
+    }
+
+    template <typename T>
+    T *getComponent()
+    {
+        for (auto &comp : components)
+        {
+            if (dynamic_cast<T *>(comp.get()))
+            {
+                return static_cast<T *>(comp.get());
+            }
+        }
+        return nullptr;
+    }
+
+    void removeComponent(Component *comp)
+    {
+        components.erase(
+            std::remove_if(components.begin(), components.end(),
+                           [comp](const std::unique_ptr<Component> &p)
+                           { return p.get() == comp; }),
+            components.end());
+    }
+};
+```
+
+./scene_roaming.cpp:
+```
+#include "imgui.h"
+#include "imgui_internal.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
+#include "scene_roaming.h"
+#include "geometry_factory.h"
+#include "ImGuiFileDialog.h"
+#include <glm/gtc/type_ptr.hpp>
+#include <glm/gtx/easing.hpp>
+#include <glm/gtx/vector_angle.hpp>
+#include <filesystem>
+#include <algorithm> // for std::sort
+
+// 辅助结构：用于排序轴的绘制顺序
+struct GizmoAxisData {
+    glm::vec3 dir;       // 原始方向
+    ImU32 mainColor;     // 主颜色 (外圈或实心)
+    ImU32 fillColor;     // 填充颜色 (仅负轴使用，稍淡)
+    char label;          // 标签文字 ('X', 'Y', 'Z' 或 0)
+    bool isNegative;     // 是否是负轴
+    float zDepth;        // 变换后的深度 (用于排序)
+    ImVec2 screenPos;    // 变换后的屏幕位置
+};
+
+void SceneRoaming::updateContentScale()
+{
+    float x, y;
+    glfwGetWindowContentScale(_window, &x, &y);
+    // 取较大的那个作为主缩放比例
+    _contentScale = (x > y) ? x : y;
+}
+
+SceneRoaming::SceneRoaming(const Options &options) : Application(options)
+{
+    glfwSetInputMode(_window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+
+    // 在初始化 ImGui 之前，必须先获取当前显示器的缩放比例！
+    // 否则 initImGui 里的字体加载逻辑会一直使用默认的 1.0f
+    updateContentScale();
+
+    // 标记项目未打开
+    _isProjectOpen = false;
+
+    // 1. 在做任何场景加载之前，先设置资源根目录！
+    // 这样 ResourceManager 才知道去哪里找文件
+    ResourceManager::Get().setProjectRoot(options.assetRootDir);
+
+    // =================================================
+    // [新逻辑] 初始化子系统
+    // =================================================
+    _scene = std::make_unique<Scene>();
+    _renderer = std::make_unique<Renderer>();
+
+    // 1. 初始化渲染资源 (Shader, Skybox 等)
+    _renderer->init();
+
+    // 2. 初始化场景数据 (创建默认灯光等)
+    _scene->createDefaultScene();
+
+    // 初始化面板
+    _sceneViewPanel = std::make_unique<SceneViewPanel>();
+    _hierarchyPanel = std::make_unique<HierarchyPanel>();
+    _inspectorPanel = std::make_unique<InspectorPanel>();
+    _projectPanel = std::make_unique<ProjectPanel>();
+
+    initImGui();
+    // initSceneFBO 不需要在这里调，第一次 renderUI 时会根据窗口大小自动调
+}
+
+SceneRoaming::~SceneRoaming()
+{
+    // 在 OpenGL 上下文销毁前，清空资源缓存
+    ResourceManager::Get().shutdown();
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+}
+
+void SceneRoaming::initImGui()
+{
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO &io = ImGui::GetIO();
+    (void)io;
+
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+
+    ImGui::StyleColorsDark(); // 使用暗色主题
+
+    ImGui_ImplGlfw_InitForOpenGL(_window, true);
+    ImGui_ImplOpenGL3_Init("#version 330");
+
+    // --- High DPI 适配逻辑 ---
+
+    // 1. 缩放 UI 样式 (按钮大小、间距等)
+    if (_contentScale > 1.0f)
+    {
+        ImGuiStyle& style = ImGui::GetStyle();
+        style.ScaleAllSizes(_contentScale);
+    }
+
+    // 2. 缩放字体
+    // ImGui 默认字体是位图字体，直接缩放会模糊。
+    // 强烈建议加载一个 TTF 字体并指定像素大小。
+    // Windows 路径示例 (你可以换成你的项目内的字体路径 "media/fonts/arial.ttf")
+    std::string fontPath = getAssetFullPath("fonts/Roboto-Regular.ttf");
+    // 如果没有字体文件，可以用 Windows 自带的，或者暂时忽略字体清晰度
+    // fontPath = "C:\\Windows\\Fonts\\segoeui.ttf"; 
+    std::cout << "[Info] Attempting to load font from: " << fontPath << std::endl;
+    
+    float fontSize = 16.0f * _contentScale; // 基础字号 16
+
+    if (std::filesystem::exists(fontPath)) 
+    {
+        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), fontSize);
+    }
+    else
+    {
+        // 如果找不到字体，使用默认字体并缩放 (可能会模糊)
+        io.FontGlobalScale = _contentScale;
+    }
+}
+
+void SceneRoaming::renderFrame()
+{
+    int currentW, currentH;
+    glfwGetFramebufferSize(_window, &currentW, &currentH);
+
+    // 如果长或宽为0（最小化状态），什么都不做，直接返回
+    if (currentW == 0 || currentH == 0) {
+        // 稍微休眠一下，避免空转占用 CPU 100%
+        // (在 Windows 上可以使用 std::this_thread::sleep_for，或者简单的 return)
+        return;
+    }
+
+    static bool isFullscreen = false;
+    static int lastWindowX, lastWindowY, lastWindowW, lastWindowH;
+    if (glfwGetKey(_window, GLFW_KEY_F11) == GLFW_PRESS)
+    {
+        // 简单的去抖动 (Debounce)，防止一帧多次触发
+        static double lastTime = 0.0;
+        double now = glfwGetTime();
+        if (now - lastTime > 0.2) 
+        {
+            lastTime = now;
+            isFullscreen = !isFullscreen;
+
+            if (isFullscreen)
+            {
+                // 保存当前窗口位置和大小
+                glfwGetWindowPos(_window, &lastWindowX, &lastWindowY);
+                glfwGetWindowSize(_window, &lastWindowW, &lastWindowH);
+
+                // 获取主显示器
+                GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+                const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+                
+                // 切换到全屏
+                glfwSetWindowMonitor(_window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
+            }
+            else
+            {
+                // 恢复窗口模式
+                glfwSetWindowMonitor(_window, nullptr, lastWindowX, lastWindowY, lastWindowW, lastWindowH, 0);
+            }
+        }
+    }
+
+    updateContentScale();
+
+    // =========================================================
+    // 2. 开启 ImGui 新帧 (必须在所有逻辑之前)
+    // =========================================================
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    // 1. 处理输入 (委托给 SceneViewPanel)
+    // 它内部会调用 _cameraController->update() 和 handleInput()
+    // 需要传入 Scene 指针用于射线检测
+    _sceneViewPanel->onInputUpdate(ImGui::GetIO().DeltaTime, _scene.get(), _selectedObject);
+
+    // =========================================================
+    // 3. 清理主屏幕 (Back Buffer)
+    // =========================================================
+    // 注意：这里的 Viewport 是整个窗口的大小，不是 FBO 的大小
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, currentW, currentH);
+    // 清除为黑色 (ImGui 窗口背后的颜色)
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // =========================================================
+    // 4. 执行 UI 逻辑 (并在内部触发 3D 渲染)
+    // =========================================================
+    // renderUI 会计算布局 -> 调整 FBO -> renderScene -> 提交 ImGui::Image
+    renderUI();
+
+    // =========================================================
+    // 5. 提交 ImGui 绘制数据
+    // =========================================================
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+void SceneRoaming::renderUI()
+{
+    if (!_isProjectOpen)
+    {
+        renderProjectSelector(); // 阻塞式界面
+        ImVec2 maxSize = ImGui::GetIO().DisplaySize;
+        ImVec2 minSize = ImVec2(maxSize.x * 0.5f, maxSize.y * 0.5f);
+
+        if (ImGuiFileDialog::Instance()->Display("ChooseDirDlgKey", ImGuiWindowFlags_NoCollapse, minSize, maxSize))
+        {
+            if (ImGuiFileDialog::Instance()->IsOk())
+            {
+                std::string filePathName = ImGuiFileDialog::Instance()->GetCurrentPath();
+                if (filePathName.length() < sizeof(_projectPathBuf)) {
+                    strcpy(_projectPathBuf, filePathName.c_str());
+                }
+            }
+            ImGuiFileDialog::Instance()->Close();
+        }
+    } else {
+        setupDockspace();
+
+        _sceneViewPanel->onImGuiRender(_scene.get(), _renderer.get(), _selectedObject, _contentScale);
+
+        // 1. Hierarchy
+        _hierarchyPanel->onImGuiRender(_scene, _selectedObject); // 传入引用，允许面板修改选中项
+
+        // 2. Inspector
+        // 注意：我们需要检测 Inspector 是否删除了物体
+        // 如果它删除了，selectedObject 可能会悬空，这里需要一种机制处理
+        // 在 InspectorPanel 里我们直接调用了 removeGameObject。
+        // 为了安全，我们可以在每帧开始时检查 _selectedObject 是否还在 _scene 里（可选但推荐）
+        // 或者简单的：相信用户操作流
+        _inspectorPanel->onImGuiRender(_selectedObject, _scene.get());
+
+        // 如果 Inspector 刚刚把物体删了，我们需要把 _selectedObject 置空
+        // 我们可以通过检查 Scene 是否还包含它来判断，或者让 Inspector 返回状态
+        // 简单的 Hack：如果 _selectedObject 变成了野指针会崩溃。
+        // [修正] InspectorPanel 内部做删除时，我们无法立即把这里的指针置空。
+        // 建议修改 HierarchyPanel/InspectorPanel 的逻辑，或者：
+        // 在 Scene 里加一个 isValid(GameObject*) 函数进行校验。
+        // 鉴于目前架构，如果 Inspector 点击删除，下一帧这个指针就失效了。
+        // 最简单的修复：给 Inspector 传 _selectedObject 的**引用**，让它在删除后置空！
+        
+        // 3. Project
+        _projectPanel->onImGuiRender();
+    }
+
+    // 6. 渲染结束 (保持不变)
+    ImGui::Render();
+}
+
+void SceneRoaming::setupDockspace()
+{
+    // =======================================================
+    // [核心] 真正的布局重置逻辑 (DockBuilder)
+    // =======================================================
+    
+    // 获取主视口 ID
+    ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
+
+    // 如果需要重置，或者第一次运行且没有 ini 记录
+    // (ImGui::DockBuilderGetNode 判断该 ID 是否已存在)
+    if (!_isLayoutInitialized || (ImGui::DockBuilderGetNode(dockspace_id) == NULL))
+    {
+        // 1. 清除当前所有布局
+        ImGui::DockBuilderRemoveNode(dockspace_id); 
+        
+        // 2. 添加一个空的根节点，覆盖整个视口
+        ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+        ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->Size);
+
+        // 3. [关键] 切分节点 (Split)
+        // 类似于切蛋糕：先切一刀，再在剩下的部分切一刀
+        
+        ImGuiID dock_main_id = dockspace_id; // 初始 ID
+        ImGuiID dock_right_id = 0;
+        ImGuiID dock_left_id = 0;
+        ImGuiID dock_bottom_id = 0;
+
+        // 第一刀：把右边切出来 (占 20%) -> 放 Inspector
+        dock_right_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Right, 0.2f, nullptr, &dock_main_id);
+        
+        // 第二刀：把左边切出来 (占 20%) -> 放 Hierarchy
+        dock_left_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.2f, nullptr, &dock_main_id);
+        
+        // 第三刀：把下面切出来 (占 25%) -> 放 Project
+        dock_bottom_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Down, 0.25f, nullptr, &dock_main_id);
+        
+        // 剩下的 dock_main_id 就是中间的部分 -> 放 3D Viewport
+
+        // 4. 将窗口绑定到对应的 ID
+        // 注意：这里的字符串必须和你 Begin() 里的名字完全一致！
+        ImGui::DockBuilderDockWindow("3D Viewport", dock_main_id);
+        ImGui::DockBuilderDockWindow("Scene Hierarchy", dock_left_id);
+        ImGui::DockBuilderDockWindow("Inspector", dock_right_id);
+        ImGui::DockBuilderDockWindow("Project / Assets", dock_bottom_id);
+
+        // 5. 完成构建
+        ImGui::DockBuilderFinish(dockspace_id);
+
+        _isLayoutInitialized = true;
+    }
+
+    // =======================================================
+    // 正常渲染
+    // =======================================================
+
+    // 绑定到我们刚才构建的 ID
+    ImGui::DockSpaceOverViewport(dockspace_id, ImGui::GetMainViewport());
+
+    // =======================================================
+    // 2. 顶部菜单栏 (可选，模仿 Blender)
+    // =======================================================
+    if (ImGui::BeginMainMenuBar())
+    {
+        if (ImGui::BeginMenu("File"))
+        {
+            if (ImGui::MenuItem("Exit")) glfwSetWindowShouldClose(_window, true);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("View"))
+        {
+            if (ImGui::MenuItem("Reset Layout")) _isLayoutInitialized = false;
+            ImGui::EndMenu();
+        }
+        ImGui::EndMainMenuBar();
+    }
+}
+
+void SceneRoaming::renderProjectSelector()
+{
+    // 获取视口中心
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImVec2 center = viewport->GetCenter();
+
+    // 设定窗口大小
+    ImVec2 windowSize(600, 300); // 稍微宽一点，高一点
+    ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f)); // 真正的屏幕居中
+    ImGui::SetNextWindowSize(windowSize);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
+    
+    // [UI美化] 稍微加点圆角和阴影 (如果支持)
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+    ImGui::Begin("Project Setup", nullptr, flags);
+
+    // 垂直居中内容
+    float contentHeight = 120.0f; // 估算内容高度
+    ImGui::SetCursorPosY((windowSize.y - contentHeight) * 0.5f);
+
+    // 大标题
+    ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]); // 假设默认字体
+    // 如果你有大字体，这里 Push 大字体
+    float textWidth = ImGui::CalcTextSize("Select or Create Project Folder").x;
+    ImGui::SetCursorPosX((windowSize.x - textWidth) * 0.5f);
+    ImGui::Text("Select or Create Project Folder");
+    ImGui::PopFont();
+    
+    ImGui::Dummy(ImVec2(0, 20)); // 间距
+
+    // --- 路径输入行 ---
+    // 动态计算宽度：总宽 - 按钮宽 - 间距 - 左右padding
+    float padding = 40.0f; // 左右留白
+    float btnWidth = 100.0f;
+    float spacing = ImGui::GetStyle().ItemSpacing.x;
+    float inputWidth = windowSize.x - (padding * 2) - btnWidth - spacing;
+
+    ImGui::SetCursorPosX(padding); // 左对齐开始
+    
+    // 输入框
+    ImGui::PushItemWidth(inputWidth);
+    ImGui::InputText("##Path", _projectPathBuf, sizeof(_projectPathBuf));
+    ImGui::PopItemWidth();
+
+    ImGui::SameLine();
+
+    // 浏览按钮
+    if (ImGui::Button("Browse...", ImVec2(btnWidth, 0)))
+    {
+        IGFD::FileDialogConfig config;
+        config.path = ".";
+        ImGuiFileDialog::Instance()->OpenDialog("ChooseDirDlgKey", "Choose Project Directory", nullptr, config);
+    }
+
+    ImGui::Dummy(ImVec2(0, 20)); // 间距
+
+    // --- 确认按钮 (居中) ---
+    float confirmBtnWidth = 200.0f;
+    ImGui::SetCursorPosX((windowSize.x - confirmBtnWidth) * 0.5f);
+    
+    // [UX] 如果路径为空，禁用按钮
+    bool hasPath = strlen(_projectPathBuf) > 0;
+    if (!hasPath) ImGui::BeginDisabled();
+    
+    if (ImGui::Button("Open / Create Project", ImVec2(confirmBtnWidth, 40)))
+    {
+        std::string path(_projectPathBuf);
+        if (!std::filesystem::exists(path)) {
+            std::filesystem::create_directories(path);
+        }
+        ResourceManager::Get().setProjectRoot(path);
+        _isProjectOpen = true;
+    }
+    
+    if (!hasPath) ImGui::EndDisabled();
+
+    ImGui::End();
+    ImGui::PopStyleVar(); // Pop WindowRounding
+}
+```
+
+./scene_roaming.h:
+```
+#pragma once
+
+#include <memory>
+#include <vector>
+#include <imgui.h>
+#include "base/application.h"
+#include "base/glsl_program.h"
+#include "engine/scene.h"
+#include "engine/renderer.h"
+#include "editor/editor_camera.h"
+#include "editor/panels/hierarchy_panel.h"
+#include "editor/panels/inspector_panel.h"
+#include "editor/panels/project_panel.h"
+#include "editor/panels/scene_view_panel.h"
+#include "scene_object.h"
+#include "outline_pass.h"
+#include "resource_manager.h"
+
+class SceneRoaming : public Application
+{
+public:
+    SceneRoaming(const Options &options);
+    ~SceneRoaming();
+
+    void handleInput() override {};
+    void renderFrame() override;
+
+private:
+    std::unique_ptr<Scene> _scene;       // 负责数据
+    std::unique_ptr<Renderer> _renderer; // 负责画画
+
+    std::unique_ptr<SceneViewPanel> _sceneViewPanel;
+    std::unique_ptr<HierarchyPanel> _hierarchyPanel;
+    std::unique_ptr<InspectorPanel> _inspectorPanel;
+    std::unique_ptr<ProjectPanel> _projectPanel;
+
+    // 编辑器状态变量
+    bool _isLayoutInitialized = false; // 用于只在第一次运行时设置窗口位置
+    bool _isProjectOpen = false;
+    char _projectPathBuf[256] = "";
+    float _contentScale = 1.0f;
+
+    // 选中状态
+    GameObject *_selectedObject = nullptr;
+
+    // UI 相关
+    void initImGui();
+    void renderUI();
+    void renderProjectSelector();
+    void setupDockspace();
+    void updateContentScale();
+};
+```
+
+./editor/editor_camera.cpp:
+```
+#include "editor_camera.h"
+#include "base/camera.h"
+#include "scene_object.h" // 为了访问 GameObject 的 Transform
+#include <imgui.h>
+#include <imgui_internal.h>
+#include <GLFW/glfw3.h>
+#include <glm/gtx/vector_angle.hpp>
+#include <algorithm> // for std::sort
+
+// 那个 GizmoAxisData 结构体也可以搬到这里来
+struct GizmoAxisData {
+    glm::vec3 dir;       // 原始方向
+    ImU32 mainColor;     // 主颜色 (外圈或实心)
+    ImU32 fillColor;     // 填充颜色 (仅负轴使用，稍淡)
+    char label;          // 标签文字 ('X', 'Y', 'Z' 或 0)
+    bool isNegative;     // 是否是负轴
+    float zDepth;        // 变换后的深度 (用于排序)
+    ImVec2 screenPos;    // 变换后的屏幕位置
+};
+
+#include "editor_camera.h"
+#include <glm/gtc/matrix_transform.hpp> // for glm::lookAt
+#include <glm/gtc/quaternion.hpp>     // for glm::quat_cast
+
+EditorCamera::EditorCamera(int width, int height)
+{
+    // 1. 计算宽高比 (使用传入的参数)
+    float aspect = (float)width / (float)height;
+    
+    // 2. 初始化相机容器
+    _cameras.resize(2);
+
+    constexpr float znear = 0.1f;
+    constexpr float zfar = 10000.0f;
+
+    // =============================================
+    // Setup Perspective Camera (Index 0)
+    // =============================================
+    _cameras[0] = std::make_unique<PerspectiveCamera>(glm::radians(60.0f), aspect, znear, zfar);
+
+    // [搬运] 初始状态：看着原点，距离 15 米
+    _pivot = glm::vec3(0.0f, 0.5f, 0.0f); // 原 _cameraPivot
+    
+    // [搬运] 稍微抬高一点角度
+    glm::vec3 startPos = glm::vec3(0.0f, 5.0f, 15.0f);
+    
+    // [搬运] 初始化平滑缩放变量
+    _currentOrbitDist = glm::length(startPos - _pivot);
+    _targetOrbitDist = _currentOrbitDist;
+    
+    // [搬运] 设置相机位置
+    _cameras[0]->transform.position = startPos;
+
+    // [搬运] 计算初始旋转 (LookAt)
+    // 注意：这里需要 include <glm/gtc/matrix_transform.hpp>
+    glm::mat4 view = glm::lookAt(_cameras[0]->transform.position, _pivot, glm::vec3(0, 1, 0));
+    _cameras[0]->transform.rotation = glm::quat_cast(glm::inverse(view));
+
+    // =============================================
+    // Setup Orthographic Camera (Index 1)
+    // =============================================
+    _cameras[1] = std::make_unique<OrthographicCamera>(-4.0f * aspect, 4.0f * aspect, -4.0f, 4.0f, znear, zfar);
+    _cameras[1]->transform.position = glm::vec3(0.0f, 0.0f, 15.0f);
+    
+    // 默认激活透视相机
+    _activeCameraIndex = 0;
+}
+
+void EditorCamera::update(float deltaTime)
+{
+    updateSmoothZoom(deltaTime);
+    updateAnimation(deltaTime);
+}
+
+// [搬运来源] SceneRoaming::renderUI 中处理窗口大小变化的逻辑
+void EditorCamera::onResize(int width, int height)
+{
+    float aspect = (float)width / (float)height;
+    if (auto pCam = dynamic_cast<PerspectiveCamera *>(_cameras[_activeCameraIndex].get())) {
+        pCam->aspect = aspect;
+    }
+    // 如果有正交相机也需要更新
+    if (auto oCam = dynamic_cast<OrthographicCamera *>(_cameras[1].get())) {
+        oCam->left = -4.0f * aspect;
+        oCam->right = 4.0f * aspect;
+    }
+}
+
+void EditorCamera::handleInput(const glm::vec3& scenePivot)
+{
+    // 1. [互斥锁] 如果正在拖拽 Gizmo，绝对不要处理相机旋转/平移
+    if (_isGizmoDragging) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    
+    // 2. 如果 ImGui 想要捕获键盘（例如在输入框打字），不处理快捷键
+    if (io.WantCaptureKeyboard) return;
+
+    Camera* cam = getActiveCamera();
+    float dt = io.DeltaTime;
+    const float friction = 30.0f;
+
+    // =========================================================
+    // 输入获取
+    // =========================================================
+    float dx = io.MouseDelta.x;
+    float dy = io.MouseDelta.y;
+    float scrollX = io.MouseWheelH;
+    float scrollY = io.MouseWheel;
+
+    bool isShift = io.KeyShift;
+    bool isCtrl = io.KeyCtrl;
+    bool isLMB = io.MouseDown[0];
+    bool isRMB = io.MouseDown[1];
+    bool isMMB = io.MouseDown[2];
+
+    // =========================================================
+    // [Blender 风格] 设备推断逻辑
+    // =========================================================
+    bool isFractional = (scrollY != 0.0f) && (std::abs(scrollY - std::round(scrollY)) > 0.02f);
+    bool hasHorizontal = (scrollX != 0.0f);
+    bool isMouseStep = (std::abs(scrollY) >= 0.9f);
+    
+    // 判定是否为物理鼠标滚轮
+    bool isPhysicalMouse = isMouseStep && !hasHorizontal && !isFractional;
+
+    // =========================================================
+    // 意图定义
+    // =========================================================
+    bool intentZoom = false;
+    bool intentOrbit = false;
+    bool intentPan = false;
+
+    // 缩放：Ctrl + 滚轮/触摸板，或者 物理滚轮直接滚动
+    if (isCtrl || (isPhysicalMouse && !isShift)) {
+        intentZoom = true;
+    }
+    // 平移：Shift + 中键/触摸板
+    else if (isShift) {
+        intentPan = true;
+    }
+    // 旋转：中键，或者 触摸板双指滑动
+    else if (isMMB || (scrollX != 0 || scrollY != 0)) {
+        intentOrbit = true;
+    }
+
+    // =========================================================
+    // 状态更新 (用于控制 Gizmo 显示等)
+    // =========================================================
+    if (intentPan || intentZoom || intentOrbit)
+    {
+        _isControlling = true;
+    }
+    else
+    {
+        // 如果没有按键，且不是在惯性滑动中（这里简单用按键判断），则标记结束
+        if (!isLMB && !isMMB && !isRMB && scrollX == 0 && scrollY == 0) 
+        {
+            _isControlling = false;
+        }
+    }
+
+    // =========================================================
+    // 执行逻辑
+    // =========================================================
+
+    // --- 1. 平移 (Pan) ---
+    if (intentPan)
+    {
+        float sens = 0.002f * _currentOrbitDist;
+        glm::vec3 delta(0.0f);
+        glm::vec3 right = cam->transform.getRight();
+        glm::vec3 up = cam->transform.getUp();
+
+        if (isMMB) { 
+            // 鼠标中键拖拽
+            delta = (right * -dx * sens) + (up * dy * sens);
+        } else {     
+            // 触摸板滑动
+            float trackpadSens = 5.0f * sens; 
+            delta = (right * -scrollX * trackpadSens) + (up * scrollY * trackpadSens);
+        }
+        
+        // 应用平移：相机位置和 Pivot 都要动
+        cam->transform.position += delta;
+        _pivot += delta; 
+    }
+    
+    // --- 2. 缩放 (Zoom) ---
+    else if (intentZoom)
+    {
+        float zoomFactor = 1.0f;
+        float inputVal = scrollY != 0 ? scrollY : scrollX;
+
+        if (isPhysicalMouse) {
+            // 物理滚轮：固定步进 (10%)
+            zoomFactor = (inputVal > 0) ? 0.9f : 1.1f;
+        } else {
+            // 触控板捏合：线性平滑缩放
+            float safeInput = glm::clamp(inputVal, -2.0f, 2.0f);
+            zoomFactor = 1.0f - (safeInput * 0.3f); 
+        }
+
+        // 修改目标距离，updateSmoothZoom 会负责插值
+        _targetOrbitDist *= zoomFactor;
+        if (_targetOrbitDist < 0.1f) _targetOrbitDist = 0.1f;
+    }
+
+    // --- 3. 旋转 (Orbit) ---
+    else if (intentOrbit)
+    {
+        float targetDeltaX = 0.0f;
+        float targetDeltaY = 0.0f;
+
+        if (isMMB) {
+            // 鼠标中键：直接映射
+            float mouseSens = 0.0015f; // 可以微调灵敏度
+            targetDeltaX = -dx * mouseSens;
+            targetDeltaY = -dy * mouseSens;
+            
+            // 鼠标模式下，直接应用，不使用惯性变量干扰
+            // (或者你可以选择让鼠标也有惯性，看手感喜好)
+        } else {
+            // 触控板：需要惯性平滑
+            float trackpadScaleX = 0.15f;
+            float trackpadScaleY = 0.12f;
+            targetDeltaX = -scrollX * trackpadScaleX;
+            targetDeltaY = -scrollY * trackpadScaleY;
+            
+            // 更新惯性变量
+            _smoothOrbitDelta.x = glm::mix(_smoothOrbitDelta.x, targetDeltaX, dt * friction);
+            _smoothOrbitDelta.y = glm::mix(_smoothOrbitDelta.y, targetDeltaY, dt * friction);
+        }
+
+        // 决定最终的旋转量
+        float activeDx = isMMB ? targetDeltaX : _smoothOrbitDelta.x;
+        float activeDy = isMMB ? targetDeltaY : _smoothOrbitDelta.y;
+
+        rotateCamera(activeDx, activeDy);
+    }
+    
+    // --- 4. 惯性衰减 ---
+    // 即使没有输入，惯性也需要慢慢停下来
+    else {
+        _smoothOrbitDelta = glm::mix(_smoothOrbitDelta, glm::vec2(0.0f), dt * 30.0f);
+        
+        // 如果还有残余惯性，继续旋转一点点
+        if (glm::length(_smoothOrbitDelta) > 0.001f) {
+             rotateCamera(_smoothOrbitDelta.x, _smoothOrbitDelta.y);
+             _isControlling = true; // 只要还在转，就算 controlling
+        }
+    }
+}
+
+// ... 依次搬运 rotateCamera, frameObject, updateAnimation 等函数 ...
+Ray EditorCamera::screenPointToRay(float mouseX, float mouseY, float viewportX, float viewportY, float viewportW, float viewportH)
+{
+    // 1. 安全检查
+    if (viewportW <= 0 || viewportH <= 0) 
+        return Ray(glm::vec3(0), glm::vec3(0,0,1));
+
+    // 2. [新增] 计算局部坐标 (Local Space)
+    // 鼠标在整个窗口的坐标 - 视口图片左上角的坐标 = 鼠标在视口内的坐标
+    float localX = mouseX - viewportX;
+    float localY = mouseY - viewportY;
+
+    // 3. 归一化设备坐标 (NDC: -1 ~ 1)
+    float x = (2.0f * localX) / viewportW - 1.0f;
+    float y = 1.0f - (2.0f * localY) / viewportH; // OpenGL Y轴向上，屏幕坐标向下，需要翻转
+
+    // 4. 获取当前相机矩阵
+    // 注意：这里访问的是 EditorCamera 自己的成员 _cameras
+    Camera* cam = _cameras[_activeCameraIndex].get();
+    glm::mat4 proj = cam->getProjectionMatrix();
+    glm::mat4 view = cam->getViewMatrix();
+    
+    // 5. 反投影 (Unproject)
+    glm::mat4 invVP = glm::inverse(proj * view);
+    glm::vec4 screenPos = glm::vec4(x, y, 1.0f, 1.0f);
+    glm::vec4 worldPos = invVP * screenPos;
+
+    if (worldPos.w != 0.0f) worldPos /= worldPos.w;
+
+    // 6. 计算方向
+    glm::vec3 dir = glm::normalize(glm::vec3(worldPos) - cam->transform.position);
+
+    return Ray(cam->transform.position, dir);
+}
+
+// =======================================================================================
+// 动画与平滑逻辑
+// =======================================================================================
+
+// [搬运来源] SceneRoaming::updateSmoothZoom
+// [改动] 参数改为传入 deltaTime，不再依赖 ImGui::GetIO()
+void EditorCamera::updateSmoothZoom(float dt)
+{
+    if (_isAnimating) return;
+
+    float smoothFactor = 10.0f * dt;
+    
+    if (std::abs(_targetOrbitDist - _currentOrbitDist) < 0.01f) {
+        _currentOrbitDist = _targetOrbitDist;
+    } else {
+        _currentOrbitDist = glm::mix(_currentOrbitDist, _targetOrbitDist, smoothFactor);
+    }
+
+    // 根据新的距离更新相机位置
+    glm::vec3 dir = glm::normalize(_cameras[_activeCameraIndex]->transform.position - _pivot);
+    _cameras[_activeCameraIndex]->transform.position = _pivot + dir * _currentOrbitDist;
+}
+
+// [搬运来源] SceneRoaming::startCameraAnimation
+// [改动] 变量名 _cameraPivot -> _pivot, activeCameraIndex -> _activeCameraIndex
+void EditorCamera::startAnimation(const glm::vec3& targetPos, const glm::quat& targetRot, const glm::vec3& targetPivot)
+{
+    _animStartPos = _cameras[_activeCameraIndex]->transform.position;
+    _animStartPivot = _pivot;
+    _animStartRot = _cameras[_activeCameraIndex]->transform.rotation;
+
+    _animTargetPos = targetPos;
+    _animTargetPivot = targetPivot;
+    _animTargetRot = targetRot;
+
+    // 最短路径检查
+    if (glm::dot(_animStartRot, _animTargetRot) < 0.0f)
+    {
+        _animTargetRot = -_animTargetRot;
+    }
+
+    _targetOrbitDist = glm::length(targetPos - targetPivot);
+
+    _animTime = 0.0f;
+    _isAnimating = true;
+}
+
+// [搬运来源] SceneRoaming::updateCameraAnimation
+void EditorCamera::updateAnimation(float dt)
+{
+    if (!_isAnimating) return;
+
+    _animTime += dt;
+    float t = _animTime / _animDuration;
+    
+    if (t >= 1.0f) {
+        t = 1.0f;
+        _isAnimating = false;
+        // 强制吸附
+        _pivot = _animTargetPivot;
+        _currentOrbitDist = _targetOrbitDist;
+        _cameras[_activeCameraIndex]->transform.position = _animTargetPos;
+        _cameras[_activeCameraIndex]->transform.rotation = _animTargetRot;
+        return;
+    }
+
+    float smoothT = 1.0f - pow(1.0f - t, 4.0f);
+
+    // 插值逻辑
+    glm::vec3 currentPivot = glm::mix(_animStartPivot, _animTargetPivot, smoothT);
+    _pivot = currentPivot; 
+
+    float startDist = glm::length(_animStartPos - _animStartPivot);
+    float targetDist = glm::length(_animTargetPos - _animTargetPivot);
+    float currentDist = glm::mix(startDist, targetDist, smoothT);
+    _currentOrbitDist = currentDist; 
+
+    glm::quat currentRot = glm::slerp(_animStartRot, _animTargetRot, smoothT);
+
+    glm::vec3 offset = currentRot * glm::vec3(0.0f, 0.0f, 1.0f) * currentDist;
+    glm::vec3 currentPos = currentPivot + offset;
+
+    _cameras[_activeCameraIndex]->transform.rotation = currentRot;
+    _cameras[_activeCameraIndex]->transform.position = currentPos;
+}
+
+// =======================================================================================
+// 控制逻辑
+// =======================================================================================
+
+// [搬运来源] SceneRoaming::rotateCamera
+void EditorCamera::rotateCamera(float dx, float dy)
+{
+    if (glm::length(glm::vec2(dx, dy)) < 0.00001f) return;
+
+    Camera* cam = _cameras[_activeCameraIndex].get();
+
+    glm::vec3 worldUp = glm::vec3(0, 1, 0);
+    glm::vec3 camRight = cam->transform.getRight();
+
+    glm::quat qYaw = glm::angleAxis(dx, worldUp);
+    glm::quat qPitch = glm::angleAxis(dy, camRight);
+    glm::quat qRotation = qYaw * qPitch;
+
+    glm::vec3 pivotToCam = cam->transform.position - _pivot;
+    pivotToCam = qRotation * pivotToCam; 
+    cam->transform.position = _pivot + pivotToCam;
+
+    cam->transform.rotation = qRotation * cam->transform.rotation;
+    cam->transform.rotation = glm::normalize(cam->transform.rotation);
+}
+
+// [搬运来源] SceneRoaming::switchToView
+void EditorCamera::switchToView(const glm::vec3& dir)
+{
+    glm::vec3 targetPos = _pivot + glm::normalize(dir) * _targetOrbitDist; 
+    
+    glm::vec3 up = glm::vec3(0, 1, 0);
+    if (std::abs(dir.y) > 0.9f) {
+        up = glm::vec3(0, 0, -1);
+    }
+
+    glm::mat4 targetViewMat = glm::lookAt(targetPos, _pivot, up);
+    glm::quat targetRot = glm::quat_cast(glm::inverse(targetViewMat));
+
+    startAnimation(targetPos, targetRot, _pivot);
+}
+
+// [搬运来源] SceneRoaming::frameSelectedObject
+// [改动] 参数改为 GameObject* obj
+void EditorCamera::frameObject(GameObject* obj)
+{
+    if (!obj) return;
+
+    BoundingBox bounds;
+    // bool hasBounds = false; // 未使用
+    glm::vec3 centerOffset(0.0f); 
+    float objectRadius = 1.0f;    
+
+    if (auto mesh = obj->getComponent<MeshComponent>()) {
+        bounds = mesh->model->getBoundingBox();
+        // hasBounds = true;
+
+        glm::vec3 localCenter = (bounds.min + bounds.max) * 0.5f;
+        centerOffset = obj->transform.rotation * (localCenter * obj->transform.scale);
+
+        glm::vec3 size = (bounds.max - bounds.min) * obj->transform.scale;
+        objectRadius = glm::length(size) * 0.5f; 
+    }
+
+    glm::vec3 targetPivot = obj->transform.position + centerOffset;
+
+    if (objectRadius < 0.5f) objectRadius = 0.5f;
+    
+    float halfFov = glm::radians(30.0f);
+    float dist = objectRadius / glm::sin(halfFov);
+    dist *= 1.3f; 
+
+    _targetOrbitDist = dist; 
+
+    glm::vec3 fixedDir = glm::normalize(glm::vec3(0.0f, 1.0f, 1.0f));
+    glm::vec3 targetPos = targetPivot + fixedDir * dist;
+
+    glm::vec3 targetUp = glm::vec3(0, 1, 0);
+    glm::mat4 targetView = glm::lookAt(targetPos, targetPivot, targetUp);
+    glm::quat targetRot = glm::quat_cast(glm::inverse(targetView));
+
+    startAnimation(targetPos, targetRot, targetPivot);
+}
+
+// =======================================================================================
+// Gizmo 绘制与交互
+// =======================================================================================
+
+// [搬运来源] SceneRoaming::renderUI 中 "{ // [新增] 绘制 View Gizmo ... }" 代码块
+// [改动] 封装了原本在 renderUI 里的交互逻辑
+bool EditorCamera::drawViewGizmo(const glm::vec2& viewportPos, const glm::vec2& viewportSize)
+{
+    float gizmoSize = 65.0f; 
+    float safePadding = gizmoSize + 15.0f + 30.0f;
+
+    ImVec2 gizmoCenter = ImVec2(
+        viewportPos.x + viewportSize.x - safePadding,
+        viewportPos.y + safePadding
+    );
+
+    glm::mat4 view = _cameras[_activeCameraIndex]->getViewMatrix();
+    bool isGizmoHovered = false;
+
+    // 调用内部绘制函数 (对应旧的 drawViewGizmo)
+    glm::vec3 clickedDir = drawGizmoInternal(
+        ImGui::GetWindowDrawList(), 
+        glm::vec2(gizmoCenter.x, gizmoCenter.y), 
+        gizmoSize,
+        isGizmoHovered
+    );
+
+    // --- 拖拽逻辑 ---
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && isGizmoHovered && glm::length(clickedDir) < 0.1f)
+    {
+        _isGizmoDragging = true;
+    }
+
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+    {
+        _isGizmoDragging = false;
+    }
+
+    if (_isGizmoDragging)
+    {
+        ImVec2 delta = ImGui::GetIO().MouseDelta;
+        float sens = 0.005f; 
+        rotateCamera(-delta.x * sens, -delta.y * sens);
+    }
+
+    // --- 点击吸附逻辑 (Snap View) ---
+    if (!_isGizmoDragging && glm::length(clickedDir) > 0.1f)
+    {
+        float dist = glm::length(_cameras[_activeCameraIndex]->transform.position - _pivot);
+        if (dist < 1.0f) dist = 5.0f;
+
+        glm::vec3 targetPos = _pivot + clickedDir * dist;
+        glm::vec3 up = glm::vec3(0, 1, 0); 
+        glm::vec3 currentDir = glm::normalize(_cameras[_activeCameraIndex]->transform.position - _pivot);
+        glm::vec3 currentUp = _cameras[_activeCameraIndex]->transform.getUp();
+
+        // 逻辑完全搬运自 SceneRoaming
+        if (abs(clickedDir.y) > 0.9f) {
+            float invert = (currentUp.y < -0.1f) ? -1.0f : 1.0f;
+            if (abs(currentDir.z) > abs(currentDir.x)) {
+                float sign = (currentDir.z >= 0.0f) ? 1.0f : -1.0f;
+                if (clickedDir.y > 0) up = glm::vec3(0, 0, -1.0f * sign * invert);
+                else                  up = glm::vec3(0, 0, 1.0f * sign * invert);
+            } else {
+                float sign = (currentDir.x >= 0.0f) ? 1.0f : -1.0f;
+                if (clickedDir.y > 0) up = glm::vec3(-1.0f * sign * invert, 0, 0);
+                else                  up = glm::vec3(1.0f * sign * invert, 0, 0);
+            }
+        }
+        else {
+            float dot = glm::dot(clickedDir, currentUp);
+            bool isBackFlip  = dot > 0.5f;   
+            bool isFrontFlip = dot < -0.5f;  
+            bool isTopHemi    = currentDir.y > 0.1f;  
+            bool isAlreadyUpsideDown = currentUp.y < -0.1f;
+
+            if (isBackFlip) {
+                if (isTopHemi) up = glm::vec3(0, -1, 0); 
+                else           up = glm::vec3(0, 1, 0);  
+            }
+            else if (isFrontFlip) {
+                if (isTopHemi) up = glm::vec3(0, 1, 0);
+                else           up = glm::vec3(0, -1, 0); 
+            }
+            else {
+                if (isAlreadyUpsideDown) up = glm::vec3(0, -1, 0); 
+                else                     up = glm::vec3(0, 1, 0);
+            }
+        }
+
+        glm::mat4 targetViewMat = glm::lookAt(targetPos, _pivot, up); 
+        glm::quat targetRot = glm::quat_cast(glm::inverse(targetViewMat));
+        startAnimation(targetPos, targetRot, _pivot);
+    }
+
+    return isGizmoHovered;
+}
+
+// [搬运来源] SceneRoaming::drawViewGizmo (最原始的那个绘制函数)
+// [改动] 参数简化，不再传入 cameraPos 等，因为类成员里有
+glm::vec3 EditorCamera::drawGizmoInternal(ImDrawList* drawList, const glm::vec2& centerPos, float axisLength, bool& outGizmoHovered)
+{
+    ImVec2 center(centerPos.x, centerPos.y);
+
+    float circleRadius = 15.0f;    
+    float lineThickness = 4.0f;   
+    float outlineThickness = 3.0f; 
+    float fontSize = 23.0f;
+    float bgRadius = axisLength + circleRadius * 2.0f;
+
+    ImU32 colR = IM_COL32(240, 55, 82, 255);
+    ImU32 colG = IM_COL32(110, 159, 29, 255);
+    ImU32 colB = IM_COL32(47, 132, 229, 255);
+    ImU32 colR_Trans = IM_COL32(240, 55, 82, 100);
+    ImU32 colG_Trans = IM_COL32(110, 159, 29, 100);
+    ImU32 colB_Trans = IM_COL32(47, 132, 229, 100);
+    ImU32 colText = IM_COL32(0, 0, 0, 255);
+    ImU32 colBgHover = IM_COL32(255, 255, 255, 30); 
+
+    ImVec2 mousePos = ImGui::GetMousePos();
+    float distFromCenter = sqrtf(powf(mousePos.x - center.x, 2) + powf(mousePos.y - center.y, 2));
+    outGizmoHovered = (distFromCenter < bgRadius);
+
+    if (outGizmoHovered || _isGizmoDragging) {
+        drawList->AddCircleFilled(center, bgRadius, colBgHover);
+    }
+
+    std::vector<GizmoAxisData> axes = {
+        { {1,0,0},  colR, 0,          'X', false },
+        { {0,1,0},  colG, 0,          'Y', false },
+        { {0,0,1},  colB, 0,          'Z', false },
+        { {-1,0,0}, colR, colR_Trans, 0,   true },
+        { {0,-1,0}, colG, colG_Trans, 0,   true },
+        { {0,0,-1}, colB, colB_Trans, 0,   true }
+    };
+
+    glm::mat4 viewMatrix = _cameras[_activeCameraIndex]->getViewMatrix();
+    glm::mat3 viewRot = glm::mat3(viewMatrix);
+    
+    for (auto& axis : axes) {
+        glm::vec3 localDir = viewRot * axis.dir;
+        axis.zDepth = localDir.z;
+        axis.screenPos = ImVec2(
+            center.x + localDir.x * axisLength,
+            center.y - localDir.y * axisLength
+        );
+    }
+
+    std::sort(axes.begin(), axes.end(), [](const GizmoAxisData& a, const GizmoAxisData& b) {
+        return a.zDepth < b.zDepth;
+    });
+
+    bool isMouseClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const GizmoAxisData* hoveredAxis = nullptr;
+
+    ImFont* font = ImGui::GetFont();
+    for (const auto& axis : axes)
+    {
+        float dist = sqrtf(powf(mousePos.x - axis.screenPos.x, 2) + powf(mousePos.y - axis.screenPos.y, 2));
+        if (dist <= circleRadius + 2.0f) hoveredAxis = &axis;
+        bool isHovered = (hoveredAxis == &axis);
+        if (_isGizmoDragging) isHovered = false;
+
+        if (!axis.isNegative)
+        {
+            if (isHovered) drawList->AddCircle(axis.screenPos, circleRadius + 2.0f, IM_COL32(255,255,255,150), 0, 2.0f);
+            glm::vec2 dir2D = glm::vec2(axis.screenPos.x - center.x, axis.screenPos.y - center.y);
+            float len = glm::length(dir2D);
+            if (len > circleRadius) 
+            {
+                dir2D /= len;
+                ImVec2 lineEndPos = ImVec2(
+                    axis.screenPos.x - dir2D.x * (circleRadius - 1.5f), 
+                    axis.screenPos.y - dir2D.y * (circleRadius - 1.5f)
+                );
+                drawList->AddLine(center, lineEndPos, axis.mainColor, lineThickness);
+            }
+            drawList->AddCircleFilled(axis.screenPos, circleRadius - 1.0f, axis.mainColor);
+            drawList->AddCircle(axis.screenPos, circleRadius, axis.mainColor, 0, outlineThickness);
+
+            char text[2] = { axis.label, '\0' };
+            ImVec2 textSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, text);
+            ImVec2 opticalOffset = ImVec2(0.4f, 0.4f); 
+            ImVec2 textPos = ImVec2(
+                axis.screenPos.x - textSize.x * 0.5f + opticalOffset.x,
+                axis.screenPos.y - textSize.y * 0.5f + opticalOffset.y
+            );
+            drawList->AddText(font, fontSize, textPos, colText, text);
+        }
+        else
+        {
+            if (isHovered) drawList->AddCircle(axis.screenPos, circleRadius + 2.0f, IM_COL32(255,255,255,150), 0, 2.0f);
+            drawList->AddCircleFilled(axis.screenPos, circleRadius - 1.0f, axis.fillColor);
+            drawList->AddCircle(axis.screenPos, circleRadius, axis.mainColor, 0, outlineThickness);
+        }
+    }
+
+    if (_isGizmoDragging) return glm::vec3(0,0,0);
+    if (isMouseClicked && hoveredAxis) return hoveredAxis->dir;
+
+    return glm::vec3(0, 0, 0); 
+}
+```
+
+./editor/editor_camera.h:
+```
+#pragma once
+
+#include <memory>
+#include <vector>
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include "base/camera.h"
+#include "physics_utils.h"
+
+// 前置声明
+class GameObject; 
+class Scene;
+struct ImDrawList;
+
+class EditorCamera
+{
+public:
+    EditorCamera(int width, int height);
+    ~EditorCamera() = default;
+
+    // --- 核心更新 ---
+    // 每帧调用，处理输入和平滑插值
+    void update(float deltaTime);
+    
+    // 当窗口大小改变时调用
+    void onResize(int width, int height);
+
+    // --- 输入处理 ---
+    // 接管 ImGui 的输入
+    void handleInput(const glm::vec3& scenePivot = glm::vec3(0.0f));
+
+    // --- 功能接口 ---
+    Camera* getActiveCamera() const { return _cameras[_activeCameraIndex].get(); }
+    
+    // 获取当前的 Pivot (注视点)
+    glm::vec3 getPivot() const { return _pivot; }
+
+    // 聚焦物体 (对应原来的 frameSelectedObject)
+    void frameObject(GameObject* obj);
+
+    // 切换视角 (对应原来的 switchToView)
+    void switchToView(const glm::vec3& dir);
+
+    // 屏幕射线 (对应原来的 screenPointToRay)
+    // 需要传入视口的位置和大小 (ImGui Image 的 Rect)
+    Ray screenPointToRay(float mouseX, float mouseY, float viewportX, float viewportY, float viewportW, float viewportH);
+
+    // 绘制右上角的 View Gizmo (返回是否被 Hover)
+    bool drawViewGizmo(const glm::vec2& viewportPos, const glm::vec2& viewportSize);
+
+    // 用于外部查询是否正在操作相机 (SceneRoaming 可以用它来决定是否绘制选择框等)
+    bool isControlling() const { return _isControlling; }
+
+private:
+    // --- 内部状态 (从 SceneRoaming 搬过来的) ---
+    std::vector<std::unique_ptr<Camera>> _cameras;
+    int _activeCameraIndex = 0;
+
+    glm::vec3 _pivot = glm::vec3(0.0f);
+    glm::vec2 _smoothOrbitDelta = glm::vec2(0.0f);
+    
+    // 平滑缩放变量
+    float _currentOrbitDist = 15.0f;
+    float _targetOrbitDist = 15.0f;
+
+    // 动画变量
+    bool _isAnimating = false;
+    float _animTime = 0.0f;
+    float _animDuration = 0.3f;
+    glm::vec3 _animStartPos, _animTargetPos;
+    glm::vec3 _animStartPivot, _animTargetPivot;
+    glm::quat _animStartRot, _animTargetRot;
+
+    // Gizmo 拖拽状态
+    bool _isGizmoDragging = false;
+    bool _isControlling = false;
+
+    // --- 内部辅助函数 ---
+    void rotateCamera(float dx, float dy);
+    void startAnimation(const glm::vec3& targetPos, const glm::quat& targetRot, const glm::vec3& targetPivot);
+    void updateAnimation(float dt);
+    void updateSmoothZoom(float dt);
+    
+    // 那个很长的绘制 Gizmo 的函数
+    glm::vec3 drawGizmoInternal(ImDrawList* drawList, const glm::vec2& center, float size, bool& outHovered);
+};
+```
+
+./editor/panels/hierarchy_panel.cpp:
+```
+#include "hierarchy_panel.h"
+#include <imgui.h>
+
+HierarchyPanel::HierarchyPanel() : Panel("Scene Hierarchy") {}
+
+void HierarchyPanel::onImGuiRender(const std::unique_ptr<Scene>& scene, GameObject*& selectedObject)
+{
+    if (!_isOpen) return;
+
+    // 注意：ImGui::Begin 需要传入指针来控制关闭按钮
+    if (!ImGui::Begin(_title.c_str(), &_isOpen)) {
+        ImGui::End();
+        return;
+    }
+
+    // 1. 添加物体按钮
+    if (ImGui::Button("+ Add Object"))
+        ImGui::OpenPopup("AddObjPopup");
+    
+    if (ImGui::BeginPopup("AddObjPopup"))
+    {
+        if (ImGui::MenuItem("Cube")) {
+            scene->createCube(); 
+        }
+        if (ImGui::MenuItem("Point Light")) {
+            scene->createPointLight();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::Separator();
+
+    // 2. 遍历物体列表
+    const auto& objects = scene->getGameObjects();
+    
+    for (int i = 0; i < objects.size(); ++i)
+    {
+        auto &go = objects[i];
+        
+        // 使用 Selectable 模拟列表项
+        // 未来如果要支持拖拽层级，这里需要改用 ImGui::TreeNode
+        std::string label = go->name + "##" + std::to_string(i);
+        if (ImGui::Selectable(label.c_str(), selectedObject == go.get()))
+        {
+            selectedObject = go.get();
+        }
+    }
+
+    // 3. 点击空白处取消选择
+    if (ImGui::IsMouseDown(0) && ImGui::IsWindowHovered())
+        selectedObject = nullptr;
+
+    ImGui::End();
+}
+```
+
+./editor/panels/hierarchy_panel.h:
+```
+#pragma once
+#include "panel.h"
+#include "engine/scene.h"
+
+class HierarchyPanel : public Panel {
+public:
+    HierarchyPanel();
+    
+    // 我们需要传入 Scene 指针来遍历物体
+    // 我们需要传入 selectedObject 的引用，以便面板能修改当前选中的物体
+    void onImGuiRender(const std::unique_ptr<Scene>& scene, GameObject*& selectedObject);
+
+    // 覆盖基类接口 (虽然主要用上面的带参版本)
+    void onImGuiRender() override {} 
+};
+```
+
+./editor/panels/inspector_panel.cpp:
+```
+#include "inspector_panel.h"
+#include "geometry_factory.h"
+#include "resource_manager.h"
+#include <imgui.h>
+#include <glm/gtc/type_ptr.hpp>
+
+InspectorPanel::InspectorPanel() : Panel("Inspector") {}
+
+void InspectorPanel::onImGuiRender(GameObject*& selectedObject, Scene* sceneContext)
+{
+    if (!_isOpen) return;
+
+    if (!ImGui::Begin(_title.c_str(), &_isOpen)) {
+        ImGui::End();
+        return;
+    }
+
+    if (selectedObject)
+    {
+        // 1. Name & Delete Object
+        char nameBuf[128];
+        strcpy(nameBuf, selectedObject->name.c_str());
+
+        ImGuiStyle& style = ImGui::GetStyle();
+        float availableWidth = ImGui::GetContentRegionAvail().x;
+        const char* btnLabel = "Delete Object"; 
+        float buttonWidth = ImGui::CalcTextSize(btnLabel).x + style.FramePadding.x * 2.0f;
+        float inputWidth = availableWidth - buttonWidth - style.ItemSpacing.x;
+
+        ImGui::SetNextItemWidth(inputWidth);
+        if (ImGui::InputText("##Name", nameBuf, sizeof(nameBuf)))
+            selectedObject->name = nameBuf;
+
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1));
+        bool shouldDeleteObj = ImGui::Button(btnLabel);
+        ImGui::PopStyleColor();
+
+        if (shouldDeleteObj && sceneContext)
+        {
+            sceneContext->removeGameObject(selectedObject);
+            selectedObject = nullptr;
+            // 立即结束当前 Frame 的绘制，防止访问野指针
+            ImGui::End(); 
+            return;
+        }
+        else 
+        {
+            // 只有没删除的时候才继续绘制
+            ImGui::Separator();
+            drawComponents(selectedObject);
+        }
+    }
+    else
+    {
+        float availW = ImGui::GetContentRegionAvail().x;
+        float textW = ImGui::CalcTextSize("No Object Selected").x;
+        if (availW > textW) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availW - textW) * 0.5f);
+        ImGui::TextDisabled("No Object Selected");
+    }
+
+    ImGui::End();
+}
+
+void InspectorPanel::drawComponents(GameObject* obj)
+{
+    // 2. Transform
+    if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::DragFloat3("Position", glm::value_ptr(obj->transform.position), 0.1f);
+        if (ImGui::DragFloat3("Rotation", glm::value_ptr(obj->transform.rotationEuler), 0.5f))
+        {
+            obj->transform.setRotation(obj->transform.rotationEuler);
+        }
+        ImGui::DragFloat3("Scale", glm::value_ptr(obj->transform.scale), 0.1f);
+    }
+
+    // 3. Components Loop
+    Component *compToRemove = nullptr;
+    for (auto &comp : obj->components)
+    {
+        ImGui::PushID(comp.get());
+
+        std::string headerName = "Unknown Component";
+        if (comp->getType() == ComponentType::MeshRenderer) headerName = "Mesh Renderer";
+        else if (comp->getType() == ComponentType::Light) headerName = "Light Source";
+
+        bool isOpen = ImGui::CollapsingHeader(headerName.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+        if (isOpen)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.2f, 0.2f, 1.0f));
+            if (ImGui::Button("Remove Component", ImVec2(-1, 0))) 
+                compToRemove = comp.get();
+            ImGui::PopStyleColor();
+
+            ImGui::Dummy(ImVec2(0, 5));
+            drawComponentUI(comp.get()); // 调用具体绘制
+            ImGui::Dummy(ImVec2(0, 10));
+        }
+        ImGui::PopID();
+    }
+
+    if (compToRemove) obj->removeComponent(compToRemove);
+
+    // 4. Add Component
+    ImGui::Separator();
+    if (ImGui::Button("Add Component..."))
+        ImGui::OpenPopup("AddCompPopup");
+
+    if (ImGui::BeginPopup("AddCompPopup"))
+    {
+        bool hasMesh = obj->getComponent<MeshComponent>() != nullptr;
+        bool hasLight = obj->getComponent<LightComponent>() != nullptr;
+
+        if (ImGui::MenuItem("Mesh Renderer", nullptr, false, !hasMesh))
+            obj->addComponent<MeshComponent>(GeometryFactory::createCube());
+
+        if (ImGui::MenuItem("Light Source", nullptr, false, !hasLight))
+        {
+            auto light = obj->addComponent<LightComponent>(LightType::Point);
+            if (hasMesh) {
+                auto mesh = obj->getComponent<MeshComponent>();
+                mesh->isGizmo = true; 
+            }
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// [搬运] 从 SceneRoaming::drawComponentUI 原封不动搬过来
+void InspectorPanel::drawComponentUI(Component *comp)
+{
+    // ... 这里请粘贴原 SceneRoaming.cpp 中 drawComponentUI 的完整内容 ...
+    // ... 包含 Mesh Filter, Shape Combo, Light Type Combo 等几百行代码 ...
+    // 注意：需要确保 geometry_factory.h 和 resource_manager.h 已包含
+    // --- Case 1: Mesh Renderer ---
+    if (comp->getType() == ComponentType::MeshRenderer)
+    {
+        auto mesh = static_cast<MeshComponent *>(comp);
+
+        ImGui::Checkbox("Is Gizmo (Unlit)", &mesh->isGizmo);
+        ImGui::SameLine();
+        ImGui::Checkbox("Double Sided", &mesh->doubleSided);
+
+        // Mesh Filter 设置区域
+        ImGui::Separator();
+        ImGui::Text("Mesh Filter");
+
+        // 1. 形状选择下拉菜单
+        const char *shapeNames[] = {"Cube", "Sphere", "Cylinder", "Cone", "Prism", "Frustum", "Plane", "Custom OBJ"};
+        int currentItem = (int)mesh->shapeType;
+
+        bool needRebuild = false;
+
+        if (ImGui::Combo("Shape", &currentItem, shapeNames, IM_ARRAYSIZE(shapeNames)))
+        {
+            mesh->shapeType = (MeshShapeType)currentItem;
+            
+            // 如果切到了 Plane，自动开启双面；切到别的（如 Cube），自动关闭
+            if (mesh->shapeType == MeshShapeType::Plane) mesh->doubleSided = true;
+            else mesh->doubleSided = false;
+            
+            if (mesh->shapeType != MeshShapeType::CustomOBJ)
+            {
+                needRebuild = true; // <--- 立即触发重建
+            }
+        }
+
+        // 2. 根据类型显示不同的参数滑块
+        switch (mesh->shapeType)
+        {
+        case MeshShapeType::Cube:
+            if (ImGui::DragFloat("Size", &mesh->params.size, 0.05f, 0.01f, 10.0f))
+                needRebuild = true;
+            break;
+
+        case MeshShapeType::Sphere:
+            if (ImGui::DragFloat("Radius", &mesh->params.radius, 0.05f, 0.01f, 10.0f))
+                needRebuild = true;
+            if (ImGui::SliderInt("Slices", &mesh->params.slices, 3, 64))
+                needRebuild = true;
+            if (ImGui::SliderInt("Stacks", &mesh->params.stacks, 2, 64))
+                needRebuild = true;
+            break;
+
+        case MeshShapeType::Cylinder:
+            if (ImGui::DragFloat("Radius", &mesh->params.radius, 0.05f, 0.01f, 10.0f))
+                needRebuild = true;
+            if (ImGui::DragFloat("Height", &mesh->params.height, 0.05f, 0.01f, 10.0f))
+                needRebuild = true;
+            if (ImGui::SliderInt("Slices", &mesh->params.slices, 3, 64))
+                needRebuild = true;
+            break;
+
+        case MeshShapeType::Cone:
+            if (ImGui::DragFloat("Radius", &mesh->params.radius, 0.05f, 0.01f, 10.0f))
+                needRebuild = true;
+            if (ImGui::DragFloat("Height", &mesh->params.height, 0.05f, 0.01f, 10.0f))
+                needRebuild = true;
+            if (ImGui::SliderInt("Slices", &mesh->params.slices, 3, 64))
+                needRebuild = true;
+            break;
+
+        case MeshShapeType::Prism: // 多面棱柱
+            if (ImGui::DragFloat("Radius", &mesh->params.radius, 0.05f, 0.01f, 10.0f))
+                needRebuild = true;
+            if (ImGui::DragFloat("Height", &mesh->params.height, 0.05f, 0.01f, 10.0f))
+                needRebuild = true;
+            if (ImGui::SliderInt("Sides", &mesh->params.sides, 3, 32))
+                needRebuild = true;
+            break;
+
+        case MeshShapeType::Frustum: // 多面棱台
+            if (ImGui::DragFloat("Top Radius", &mesh->params.topRadius, 0.05f, 0.0f, 10.0f))
+                needRebuild = true;
+            if (ImGui::DragFloat("Btm Radius", &mesh->params.bottomRadius, 0.05f, 0.0f, 10.0f))
+                needRebuild = true;
+            if (ImGui::DragFloat("Height", &mesh->params.height, 0.05f, 0.01f, 10.0f))
+                needRebuild = true;
+            if (ImGui::SliderInt("Sides", &mesh->params.sides, 3, 32))
+                needRebuild = true;
+            break;
+
+        case MeshShapeType::Plane:
+            if (ImGui::DragFloat("Width", &mesh->params.width, 0.1f))
+                needRebuild = true; // 复用 params 里的变量，或者在 struct 加 width/depth
+                                    // 暂时复用 params.size 作为 width, params.height 作为 depth，或者我们在 struct 里加
+                                    // 为了简单，我们复用 size=width, height=depth
+            if (ImGui::DragFloat("Depth", &mesh->params.depth, 0.1f))
+                needRebuild = true;
+            break;
+
+        case MeshShapeType::CustomOBJ:
+            {
+                // 显示当前路径 (只读，或可编辑)
+                ImGui::InputText("Path", mesh->params.objPath, sizeof(mesh->params.objPath), ImGuiInputTextFlags_ReadOnly);
+
+                // [核心] 拖拽接收区 (Drop Target)
+                // 我们让整个 InputText 区域都成为接收区
+                if (ImGui::BeginDragDropTarget())
+                {
+                    // 只接受 "ASSET_OBJ" 类型的 Payload
+                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_OBJ"))
+                    {
+                       // 1. 获取 Payload (相对路径)
+                        const char* relPath = (const char*)payload->Data;
+                    
+                        // 2. 更新 UI 文字 (显示相对路径，比较短，好看)
+                        strncpy(mesh->params.objPath, relPath, sizeof(mesh->params.objPath) - 1);
+                        mesh->params.objPath[sizeof(mesh->params.objPath) - 1] = '\0';
+
+                        try {
+                            auto newModel = ResourceManager::Get().getModel(relPath); // getModel 内部处理拼接
+
+                            if (newModel) {
+                                mesh->setMesh(newModel);
+                            }
+                        } catch(...) {}
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+                
+                // 提示信息
+                ImGui::TextDisabled("(Drag an OBJ file here from Project panel)");
+                break;
+            }
+        }
+
+        // 3. 执行重建逻辑
+        if (needRebuild)
+        {
+            std::shared_ptr<Model> newModel = nullptr;
+            auto &p = mesh->params;
+
+            switch (mesh->shapeType)
+            {
+            case MeshShapeType::Cube:
+                newModel = GeometryFactory::createCube(p.size);
+                break;
+            case MeshShapeType::Sphere:
+                newModel = GeometryFactory::createSphere(p.radius, p.stacks, p.slices);
+                break;
+            case MeshShapeType::Cylinder:
+                newModel = GeometryFactory::createCylinder(p.radius, p.height, p.slices);
+                break;
+            case MeshShapeType::Cone:
+                newModel = GeometryFactory::createCone(p.radius, p.height, p.slices);
+                break;
+            case MeshShapeType::Prism:
+                newModel = GeometryFactory::createPrism(p.radius, p.height, p.sides);
+                break;
+            case MeshShapeType::Frustum:
+                newModel = GeometryFactory::createPyramidFrustum(p.topRadius, p.bottomRadius, p.height, p.sides);
+                break;
+            case MeshShapeType::Plane:
+                newModel = GeometryFactory::createPlane(p.width, p.depth);
+                break;
+            default:
+                break;
+            }
+
+            if (newModel)
+            {
+                // 保持原有的 Transform 不变，只换 Mesh
+                // 但是 Model 类里也有 Transform (local transform)，新建的 Model transform 是默认的
+                // 如果需要保留 Model 内部的 transform (例如箭头缩放)，这里需要额外处理
+                // 不过 GeometryFactory 创建出来的 Model transform 都是默认的，所以直接覆盖没问题
+
+                // 继承旧 Model 的局部缩放? 通常不需要，GeometryFactory 出来的都是标准大小
+                // 如果之前对 Gizmo 做了特殊缩放，可能会丢失，但这里是用户主动重建，重置是合理的。
+
+                mesh->setMesh(std::move(newModel));
+            }
+        }
+
+        ImGui::Separator();
+
+        // 检查宿主是否有点光源组件
+        auto lightComp = comp->owner->getComponent<LightComponent>();
+
+        // 材质 UI
+        if (ImGui::TreeNode("Material"))
+        {
+            if (lightComp)
+            {
+                // [逻辑] 如果有光源组件，强制同步颜色，并显示提示
+                mesh->material.diffuse = lightComp->color;
+                mesh->material.ambient = lightComp->color * 0.1f; // 简单的关联
+                mesh->material.specular = glm::vec3(0.0f);        // 发光体一般没有高光
+
+                ImGui::TextColored(ImVec4(1, 1, 0, 1), "[Locked]");
+                ImGui::SameLine();
+                ImGui::TextWrapped("Color is controlled by the Light Source component.");
+
+                // 仅显示只读的颜色预览 (使用 ColorButton)
+                ImGui::ColorButton("##preview", ImVec4(mesh->material.diffuse.r, mesh->material.diffuse.g, mesh->material.diffuse.b, 1.0f));
+            }
+            else
+            {
+                // [逻辑] 没有光源组件，正常显示编辑器
+                ImGui::ColorEdit3("Ambient", glm::value_ptr(mesh->material.ambient));
+                ImGui::ColorEdit3("Diffuse", glm::value_ptr(mesh->material.diffuse));
+                ImGui::ColorEdit3("Specular", glm::value_ptr(mesh->material.specular));
+            }
+
+            // Shininess 总是可以调的
+            ImGui::DragFloat("Shininess", &mesh->material.shininess, 1.0f, 1.0f, 256.0f);
+
+            ImGui::TreePop();
+        }
+    }
+
+    // --- Case 2: Light Source ---
+    else if (comp->getType() == ComponentType::Light)
+    {
+        auto light = static_cast<LightComponent *>(comp);
+
+        // 下拉菜单选择光源类型
+        const char *typeNames[] = {"Directional", "Point", "Spot"};
+        int currentType = (int)light->type;
+        if (ImGui::Combo("Type", &currentType, typeNames, 3))
+        {
+            light->type = (LightType)currentType;
+        }
+
+        ImGui::ColorEdit3("Color", glm::value_ptr(light->color));
+        ImGui::DragFloat("Intensity", &light->intensity, 0.1f, 0.0f, 10.0f);
+
+        if (light->type == LightType::Point || light->type == LightType::Spot)
+        {
+            ImGui::Text("Attenuation");
+            ImGui::DragFloat("Linear", &light->linear, 0.001f);
+            ImGui::DragFloat("Quadratic", &light->quadratic, 0.001f);
+        }
+
+        if (light->type == LightType::Spot)
+        {
+            ImGui::Text("Spot Angle");
+            float innerDeg = glm::degrees(glm::acos(light->cutOff));
+            float outerDeg = glm::degrees(glm::acos(light->outerCutOff));
+
+            if (ImGui::DragFloat("Inner (Deg)", &innerDeg, 0.5f, 0.0f, 180.0f))
+            {
+                light->cutOff = glm::cos(glm::radians(innerDeg));
+            }
+            if (ImGui::DragFloat("Outer (Deg)", &outerDeg, 0.5f, 0.0f, 180.0f))
+            {
+                light->outerCutOff = glm::cos(glm::radians(outerDeg));
+            }
+        }
+    }
+}
+```
+
+./editor/panels/inspector_panel.h:
+```
+#pragma once
+#include "panel.h"
+#include "scene_object.h"
+#include "engine/scene.h"
+
+class InspectorPanel : public Panel {
+public:
+    InspectorPanel();
+    
+    // 渲染选中物体的属性
+    void onImGuiRender(GameObject*& selectedObject, Scene* sceneContext);
+
+    void onImGuiRender() override {}
+
+private:
+    // 内部辅助函数：绘制组件列表
+    void drawComponents(GameObject* obj);
+    
+    // 内部辅助函数：绘制单个组件的具体 UI
+    void drawComponentUI(Component* comp);
+};
+```
+
+./editor/panels/panel.h:
+```
+#pragma once
+#include <string>
+#include <imgui.h>
+
+class Panel {
+public:
+    Panel(const std::string& title) : _title(title) {}
+    virtual ~Panel() = default;
+
+    // 核心绘制函数
+    // 子类实现具体的 ImGui::Begin() ... End() 逻辑
+    virtual void onImGuiRender() = 0;
+
+    // 显示/隐藏控制
+    void open() { _isOpen = true; }
+    void close() { _isOpen = false; }
+    bool isOpen() const { return _isOpen; }
+    
+    // 设置是否可见的引用 (用于 MenuItem 的 bool*)
+    bool* getOpenPtr() { return &_isOpen; }
+
+protected:
+    std::string _title;
+    bool _isOpen = true;
+};
+```
+
+./editor/panels/project_panel.cpp:
+```
+#include "project_panel.h"
+#include <imgui.h>
+
+ProjectPanel::ProjectPanel() : Panel("Project / Assets") {}
+
+void ProjectPanel::onImGuiRender()
+{
+    if (!_isOpen) return;
+
+    if (!ImGui::Begin(_title.c_str(), &_isOpen)) {
+        ImGui::End();
+        return;
+    }
+
+    const auto& files = ResourceManager::Get().getFileList();
+    
+    float padding = 10.0f;
+    float thumbnailSize = 80.0f;
+    float cellSize = thumbnailSize + padding;
+    float panelWidth = ImGui::GetContentRegionAvail().x;
+    int columnCount = (int)(panelWidth / cellSize);
+    if (columnCount < 1) columnCount = 1;
+
+    ImGui::Columns(columnCount, 0, false);
+
+    for (const auto& file : files)
+    {
+        std::string filename = file.first;
+        std::string relativePath = file.second;
+
+        ImGui::PushID(relativePath.c_str());
+
+        // 按钮代表文件
+        ImGui::Button(filename.c_str(), ImVec2(80, 80));
+
+        // 拖拽源
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+        {
+            ImGui::SetDragDropPayload("ASSET_OBJ", relativePath.c_str(), relativePath.size() + 1);
+            ImGui::Text("Model: %s", filename.c_str());
+            ImGui::EndDragDropSource();
+        }
+
+        ImGui::TextWrapped("%s", filename.c_str());
+        ImGui::PopID();
+        ImGui::NextColumn();
+    }
+
+    ImGui::Columns(1);
+    ImGui::End();
+}
+```
+
+./editor/panels/project_panel.h:
+```
+#pragma once
+#include "panel.h"
+#include "resource_manager.h"
+
+class ProjectPanel : public Panel {
+public:
+    ProjectPanel();
+    void onImGuiRender() override;
+private:
+    // 这里可以缓存一些缩略图纹理 ID
+};
+```
+
+./editor/panels/scene_view_panel.cpp:
+```
+#include "scene_view_panel.h"
+#include <imgui.h>
+#include <iostream>
+#include <limits> // for std::numeric_limits
+
+SceneViewPanel::SceneViewPanel() : Panel("3D Viewport")
+{
+    // 初始化 FBO (初始大小可以为 0，后面会自动 Resize)
+    initFBO(100, 100); 
+    
+    // 初始化相机控制器
+    // 初始宽高暂定为 800x600，会在第一次渲染时修正
+    _cameraController = std::make_unique<EditorCamera>(800, 600);
+}
+
+SceneViewPanel::~SceneViewPanel()
+{
+    if (_fbo.id) glDeleteFramebuffers(1, &_fbo.id);
+    if (_fbo.texture) glDeleteTextures(1, &_fbo.texture);
+    if (_fbo.rbo) glDeleteRenderbuffers(1, &_fbo.rbo);
+}
+
+void SceneViewPanel::initFBO(int width, int height)
+{
+    _fbo.width = width;
+    _fbo.height = height;
+
+    glGenFramebuffers(1, &_fbo.id);
+    glBindFramebuffer(GL_FRAMEBUFFER, _fbo.id);
+
+    glGenTextures(1, &_fbo.texture);
+    glBindTexture(GL_TEXTURE_2D, _fbo.texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, _fbo.texture, 0);
+
+    glGenRenderbuffers(1, &_fbo.rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, _fbo.rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, _fbo.rbo);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        std::cout << "ERROR::FRAMEBUFFER:: SceneView Framebuffer is not complete!" << std::endl;
+    
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void SceneViewPanel::resizeFBO(int width, int height)
+{
+    if (_fbo.width == width && _fbo.height == height) return;
+    
+    glDeleteFramebuffers(1, &_fbo.id);
+    glDeleteTextures(1, &_fbo.texture);
+    glDeleteRenderbuffers(1, &_fbo.rbo);
+    initFBO(width, height);
+}
+// [修改后的签名]
+void SceneViewPanel::onImGuiRender(Scene* scene, Renderer* renderer, GameObject*& selectedObject, float contentScale)
+{
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f)); 
+    if (!ImGui::Begin(_title.c_str(), &_isOpen)) {
+        ImGui::End(); ImGui::PopStyleVar(); return;
+    }
+
+    _isFocused = ImGui::IsWindowFocused(); 
+    _isHovered = ImGui::IsWindowHovered();
+
+    ImVec2 viewportPanelSize = ImGui::GetContentRegionAvail();
+    if (viewportPanelSize.x <= 0) viewportPanelSize.x = 1;
+    if (viewportPanelSize.y <= 0) viewportPanelSize.y = 1;
+
+    int rawWidth = (int)(viewportPanelSize.x * contentScale);
+    int rawHeight = (int)(viewportPanelSize.y * contentScale);
+
+    // 2. Resize FBO
+    if (rawWidth != _fbo.width || rawHeight != _fbo.height)
+    {
+        resizeFBO(rawWidth, rawHeight);
+        renderer->onResize(rawWidth, rawHeight);
+        _cameraController->onResize(rawWidth, rawHeight);
+    }
+
+    // 3. 执行渲染 (Render to FBO)
+    // 注意：这里我们直接调用 renderer，不再需要 SceneRoaming 中转
+    if (_fbo.id != 0) {
+        renderer->render(*scene, 
+                         _cameraController->getActiveCamera(), 
+                         _fbo.id, rawWidth, rawHeight, 
+                         contentScale, selectedObject);
+    }
+
+    // 4. 绘制 Image
+    ImGui::Image((ImTextureID)(intptr_t)_fbo.texture, viewportPanelSize, ImVec2(0, 1), ImVec2(1, 0));
+
+    // 记录视口位置 (用于射线检测和 Gizmo)
+    _viewportPos = ImGui::GetItemRectMin();
+    _viewportSize = ImGui::GetItemRectSize();
+
+    // 5. 绘制 Gizmo
+    _cameraController->drawViewGizmo(
+        glm::vec2(_viewportPos.x, _viewportPos.y), 
+        glm::vec2(_viewportSize.x, _viewportSize.y)
+    );
+
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
+// [完整签名]
+void SceneViewPanel::onInputUpdate(float dt, Scene* scene, GameObject*& selectedObject)
+{
+    // 如果键盘正被 UI 占用（例如正在输入文字），不处理 3D 快捷键
+    if (ImGui::GetIO().WantCaptureKeyboard) return;
+    
+    // 更新相机
+    _cameraController->update(dt);
+
+    // 快捷键 (F 聚焦)
+    // 这里需要 GLFW 窗口句柄来检测按键吗？ ImGui 提供了 IsKeyPressed
+    if (ImGui::IsKeyPressed(ImGuiKey_F)) {
+        _cameraController->frameObject(selectedObject);
+    }
+    
+    // Key 1: Front View (+Z)
+    if (ImGui::IsKeyPressed(ImGuiKey_1) || ImGui::IsKeyPressed(ImGuiKey_Keypad1)) {
+        _cameraController->switchToView(glm::vec3(0, 0, 1));
+    }
+    // Key 3: Right View (+X)
+    if (ImGui::IsKeyPressed(ImGuiKey_3) || ImGui::IsKeyPressed(ImGuiKey_Keypad3)) {
+        _cameraController->switchToView(glm::vec3(1, 0, 0));
+    }
+    // Key 7: Top View (+Y)
+    if (ImGui::IsKeyPressed(ImGuiKey_7) || ImGui::IsKeyPressed(ImGuiKey_Keypad7)) {
+        _cameraController->switchToView(glm::vec3(0, 1, 0));
+    }
+
+    // 鼠标输入
+    if (_isHovered || _isFocused) {
+        _cameraController->handleInput();
+    }
+
+    // 拾取逻辑
+    if (_isHovered && ImGui::IsMouseClicked(0) && !ImGui::IsKeyDown(ImGuiKey_LeftAlt)) {
+        // 还要检查是否点到了 Gizmo (isControlling)
+        if (!_cameraController->isControlling()) {
+            handleMousePick(scene, selectedObject);
+        }
+    }
+}
+
+// [搬运] handleMousePick
+void SceneViewPanel::handleMousePick(Scene* scene, GameObject*& selectedObject)
+{
+    // [变化1] 使用成员变量 _isHovered
+    if (!_isHovered) 
+        return;
+
+    // [变化2] 使用 ImGui 获取鼠标绝对坐标 (替代 glfwGetCursorPos)
+    ImVec2 mousePos = ImGui::GetMousePos();
+    float mouseX = mousePos.x;
+    float mouseY = mousePos.y;
+
+    // [变化3] 使用成员变量 _cameraController, _viewportPos, _viewportSize
+    auto camRay = _cameraController->screenPointToRay(
+        mouseX, mouseY, 
+        _viewportPos.x, _viewportPos.y, 
+        _viewportSize.x, _viewportSize.y
+    );
+
+    // 转换成 Physics Ray
+    // (假设 EditorCamera::Ray 和 PhysicsUtils::Ray 结构一致，或者是同一种类型)
+    Ray worldRay(camRay.origin, camRay.direction);
+
+    // [调试]
+    // std::cout << "Ray Dir: " << worldRay.direction.x << ", " 
+    //           << worldRay.direction.y << ", " << worldRay.direction.z << std::endl;
+
+    GameObject *closestObj = nullptr;
+    float closestDist = std::numeric_limits<float>::max();
+
+    // [变化4] 使用传入的 scene 指针
+    if (scene) 
+    {
+        const auto& objects = scene->getGameObjects();
+        for (const auto &go : objects)
+        {
+            auto meshComp = go->getComponent<MeshComponent>();
+            if (!meshComp || !meshComp->enabled) continue;
+
+            // --- 以下数学逻辑完全保持不变 ---
+
+            // 1. 计算 Model Matrix
+            glm::mat4 modelMatrix = go->transform.getLocalMatrix();
+            modelMatrix = modelMatrix * meshComp->model->transform.getLocalMatrix();
+
+            // 2. 将射线转到局部空间
+            glm::mat4 invModel = glm::inverse(modelMatrix);
+
+            glm::vec3 localOrigin = glm::vec3(invModel * glm::vec4(worldRay.origin, 1.0f));
+            glm::vec3 localDir = glm::vec3(invModel * glm::vec4(worldRay.direction, 0.0f));
+            
+            // 归一化
+            localDir = glm::normalize(localDir);
+
+            Ray localRay(localOrigin, localDir);
+
+            // 3. 检测
+            float t = 0.0f;
+            if (PhysicsUtils::intersectRayAABB(localRay, meshComp->model->getBoundingBox(), t))
+            {
+                if (t > 0.0f && t < closestDist)
+                {
+                    closestDist = t;
+                    closestObj = go.get();
+                }
+            }
+        }
+    }
+
+    // [变化5] 更新传入的引用引用
+    selectedObject = closestObj;
+    
+    // [调试]
+    if(selectedObject) std::cout << "Picked: " << selectedObject->name << std::endl;
+}
+```
+
+./editor/panels/scene_view_panel.h:
+```
+#pragma once
+#include "panel.h"
+#include <memory>
+#include <glad/gl.h>
+#include "editor/editor_camera.h"
+#include "engine/renderer.h"
+#include "engine/scene.h"
+
+class SceneViewPanel : public Panel {
+public:
+    SceneViewPanel();
+    ~SceneViewPanel();
+
+    // 核心绘制函数
+    // 需要传入 Scene 和 Renderer，因为面板只负责"显示"，不负责"拥有"数据
+    void onImGuiRender(Scene* scene, Renderer* renderer, GameObject*& selectedObject, float contentScale);
+
+    // 2. [关键修复] 必须覆盖基类的纯虚函数，否则此类为抽象类
+    // 给一个空实现即可，因为我们不会通过 Panel* 多态指针来调用这个函数
+    void onImGuiRender() override {}
+    
+    // 处理输入 (键盘/鼠标)
+    // 之前在 SceneRoaming::handleInput 里的逻辑移到这里
+    void onInputUpdate(float dt, Scene* scene, GameObject*& selectedObject);
+
+    // 获取内部的相机 (供外部查询，如 Renderer 需要相机矩阵)
+    Camera* getCamera() const { return _cameraController->getActiveCamera(); }
+
+private:
+    std::unique_ptr<EditorCamera> _cameraController;
+
+    // FBO 相关资源
+    struct FrameBuffer {
+        GLuint id = 0;
+        GLuint texture = 0;
+        GLuint rbo = 0;
+        int width = 0;
+        int height = 0;
+    } _fbo;
+
+    // 视口状态
+    ImVec2 _viewportPos = {0, 0};
+    ImVec2 _viewportSize = {0, 0};
+    bool _isHovered = false;
+    bool _isFocused = false;
+
+    // 内部辅助
+    void initFBO(int width, int height);
+    void resizeFBO(int width, int height);
+    void handleMousePick(Scene* scene, GameObject*& selectedObject);
+};
+```
+
+./engine/renderer.cpp:
+```
+#include "renderer.h"
+#include <iostream>
+#include <glm/gtc/type_ptr.hpp>
+
+Renderer::Renderer() {
+    // 构造函数可以留空，把初始化放在 init() 里更安全
+}
+
+Renderer::~Renderer() {
+    // unique_ptr 和 shared_ptr 会自动释放资源
+}
+
+void Renderer::init() {
+    // 1. 初始化 Shader (从 SceneRoaming::initShader 搬运过来)
+    // 请将 vsCode, fsCode, gridVs, gridFs, skyVs, skyFs 的定义和 link 逻辑放在这里
+    // 例如：
+    // _mainShader.reset(new GLSLProgram);
+    // _mainShader->attachVertexShader(vsCode); ...
+    
+    // [注意] 这里你需要把 SceneRoaming.cpp 里那一大段 const char* shader code 复制过来
+    // ... (省略几百行 Shader 代码) ...
+    // 调用 initShader(); 
+    // 顶点着色器 (Vertex Shader)
+    const char *vsCode = R"(
+        #version 330 core
+        layout(location = 0) in vec3 aPosition;
+        layout(location = 1) in vec3 aNormal;
+        layout(location = 2) in vec2 aTexCoord;
+
+        out vec3 FragPos;
+        out vec3 Normal;
+        out vec2 TexCoord;
+
+        uniform mat4 model;
+        uniform mat4 view;
+        uniform mat4 projection;
+
+        void main() {
+            FragPos = vec3(model * vec4(aPosition, 1.0));
+            // 使用 Normal Matrix 修正法线 (防止非均匀缩放导致法线错误)
+            Normal = mat3(transpose(inverse(model))) * aNormal;
+            TexCoord = aTexCoord;
+            
+            gl_Position = projection * view * vec4(FragPos, 1.0);
+        }
+    )";
+
+    // 片元着色器 (Fragment Shader) - Blinn-Phong 多光源版本
+    const char *fsCode = R"(
+        #version 330 core
+        out vec4 FragColor;
+
+        in vec3 FragPos;
+        in vec3 Normal;
+        in vec2 TexCoord;
+
+        // 材质定义
+        struct Material {
+            vec3 ambient;
+            vec3 diffuse;
+            vec3 specular;
+            float shininess;
+        }; 
+
+        // 平行光定义
+        struct DirLight {
+            vec3 direction;
+            vec3 color;
+            float intensity;
+        };
+
+        // 点光源定义
+        struct PointLight {
+            vec3 position;
+            float constant;
+            float linear;
+            float quadratic;
+            vec3 color;
+            float intensity;
+        };
+
+        // 聚光灯定义
+        struct SpotLight {
+            vec3 position;
+            vec3 direction;
+            float cutOff;
+            float outerCutOff;
+            float constant;
+            float linear;
+            float quadratic;
+            vec3 color;
+            float intensity;
+        };
+
+        // 定义最大光源数量常量
+        #define NR_POINT_LIGHTS 4
+        #define NR_SPOT_LIGHTS 4
+
+        uniform bool isUnlit;
+
+        uniform vec3 viewPos;
+        uniform Material material;
+        
+        // 我们允许多个平行光(如多个太阳)
+        #define NR_DIR_LIGHTS 2 
+        uniform DirLight dirLights[NR_DIR_LIGHTS];
+        uniform int dirLightCount; // 实际传入的数量
+
+        uniform PointLight pointLights[NR_POINT_LIGHTS];
+        uniform int pointLightCount;
+
+        uniform SpotLight spotLights[NR_SPOT_LIGHTS];
+        uniform int spotLightCount;
+
+        // 函数声明
+        vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir);
+        vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir);
+        vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir);
+
+		// 获取法线辅助函数
+		vec3 getNormal() {
+            // 归一化插值后的法线
+            vec3 n = normalize(Normal);
+            // gl_FrontFacing 是内置变量：如果是正面为 true，背面为 false
+            if (!gl_FrontFacing) {
+                n = -n; // 如果是背面，把法线反过来
+            }
+            return n;
+        }
+        
+        void main() {
+            if (isUnlit) {
+                FragColor = vec4(material.diffuse, 1.0); 
+                return;
+            }
+            
+            vec3 norm = getNormal();
+            vec3 viewDir = normalize(viewPos - FragPos);
+            
+            vec3 result = vec3(0.0);
+
+            for(int i = 0; i < dirLightCount; i++)
+                result += CalcDirLight(dirLights[i], norm, viewDir);
+            
+            for(int i = 0; i < pointLightCount; i++)
+                result += CalcPointLight(pointLights[i], norm, FragPos, viewDir);
+                
+            for(int i = 0; i < spotLightCount; i++)
+                result += CalcSpotLight(spotLights[i], norm, FragPos, viewDir);
+
+            FragColor = vec4(result, 1.0);
+        }
+
+        // --- 函数实现 ---
+
+        vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir) {
+            vec3 lightDir = normalize(-light.direction);
+            // 漫反射
+            float diff = max(dot(normal, lightDir), 0.0);
+            // 镜面反射 (Blinn-Phong)
+            vec3 halfwayDir = normalize(lightDir + viewDir);
+            float spec = pow(max(dot(normal, halfwayDir), 0.0), material.shininess);
+            // 合并
+            vec3 ambient = light.color * light.intensity * material.ambient;
+            vec3 diffuse = light.color * light.intensity * diff * material.diffuse;
+            vec3 specular = light.color * light.intensity * spec * material.specular;
+            return (ambient + diffuse + specular);
+        }
+
+        vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir) {
+            vec3 lightDir = normalize(light.position - fragPos);
+            // 衰减
+            float distance = length(light.position - fragPos);
+            float attenuation = 1.0 / (light.constant + light.linear * distance + light.quadratic * (distance * distance));    
+            // 漫反射
+            float diff = max(dot(normal, lightDir), 0.0);
+            // 镜面反射
+            vec3 halfwayDir = normalize(lightDir + viewDir);
+            float spec = pow(max(dot(normal, halfwayDir), 0.0), material.shininess);
+            // 合并
+            vec3 ambient = light.color * light.intensity * material.ambient * attenuation;
+            vec3 diffuse = light.color * light.intensity * diff * material.diffuse * attenuation;
+            vec3 specular = light.color * light.intensity * spec * material.specular * attenuation;
+            return (ambient + diffuse + specular);
+        }
+
+        vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir) {
+            vec3 lightDir = normalize(light.position - fragPos);
+            // 衰减
+            float distance = length(light.position - fragPos);
+            float attenuation = 1.0 / (light.constant + light.linear * distance + light.quadratic * (distance * distance));    
+            // 聚光强度 (Soft edges)
+            float theta = dot(lightDir, normalize(-light.direction)); 
+            float epsilon = light.cutOff - light.outerCutOff;
+            float intensity = clamp((theta - light.outerCutOff) / epsilon, 0.0, 1.0);
+            
+            // 漫反射
+            float diff = max(dot(normal, lightDir), 0.0);
+            // 镜面反射
+            vec3 halfwayDir = normalize(lightDir + viewDir);
+            float spec = pow(max(dot(normal, halfwayDir), 0.0), material.shininess);
+            // 合并
+            vec3 ambient = light.color * light.intensity * material.ambient * attenuation; // 通常聚光灯环境光很弱或没有，这里加上防止全黑
+            vec3 diffuse = light.color * light.intensity * diff * material.diffuse * attenuation * intensity;
+            vec3 specular = light.color * light.intensity * spec * material.specular * attenuation * intensity;
+            return (ambient + diffuse + specular);
+        }
+    )";
+
+    _mainShader.reset(new GLSLProgram);
+    _mainShader->attachVertexShader(vsCode);
+    _mainShader->attachFragmentShader(fsCode);
+    _mainShader->link();
+
+    // =============================================================
+    // 1. 无限网格 Shader (Unity 风格)
+    // =============================================================
+    const char* gridVs = R"(
+        #version 330 core
+        layout(location = 0) in vec3 aPos;
+        uniform mat4 view;
+        uniform mat4 projection;
+        uniform vec3 viewPos;
+        
+        out vec3 WorldPos;
+        out float Near;
+        out float Far;
+
+        void main() {
+            // 我们把一个小的平面放大很多倍来模拟无限
+            vec3 pos = aPos * 1000.0; // 放大平面
+            pos.y = 0.0; // 强制在 XZ 平面
+            WorldPos = pos;
+            gl_Position = projection * view * vec4(pos, 1.0);
+            
+            // 传递裁剪面信息用于淡出计算
+            Near = 0.1; 
+            Far = 100.0; 
+        }
+    )";
+
+    const char* gridFs = R"(
+        #version 330 core
+        out vec4 FragColor;
+        in vec3 WorldPos;
+        in float Near;
+        in float Far;
+
+        uniform vec3 viewPos;
+
+        void main() {
+            vec2 coord = WorldPos.xz;
+            vec2 derivative = fwidth(coord);
+            
+            // --- 基础参数 ---
+            // 亮白色线条，在深色背景下更清晰
+            vec3 gridColor = vec3(0.7, 0.7, 0.7); 
+            
+            // 1. 绘制小格子 (1米)
+            vec2 grid = abs(fract(coord - 0.5) - 0.5) / derivative;
+            float line = min(grid.x, grid.y);
+            float minimumz = min(derivative.y, 1.0);
+            float minimumx = min(derivative.x, 1.0);
+            
+            // 小格子透明度低一点 (0.3)
+            vec4 color = vec4(gridColor, 0.3 * (1.0 - min(line, 1.0))); 
+
+            // 2. 绘制大格子 (10米)
+            vec2 coord2 = coord / 10.0;
+            vec2 derivative2 = fwidth(coord2);
+            vec2 grid2 = abs(fract(coord2 - 0.5) - 0.5) / derivative2;
+            float line2 = min(grid2.x, grid2.y);
+            
+            // 如果是大格子线，透明度高一点 (0.8)，覆盖小格子
+            if(1.0 - min(line2, 1.0) > 0.1) {
+                color = vec4(gridColor, 0.8 * (1.0 - min(line2, 1.0)));
+            }
+
+            // 3. 轴线高亮 (X轴红色，Z轴蓝色) - 类似 Unity 编辑器
+            // 当 z 接近 0 时是 X 轴
+            // if(abs(WorldPos.z) < 0.05) color = vec4(1.0, 0.2, 0.2, 1.0); // Red X-Axis
+            // 当 x 接近 0 时是 Z 轴
+            // if(abs(WorldPos.x) < 0.05) color = vec4(0.2, 0.2, 1.0, 1.0); // Blue Z-Axis
+
+            // 4. 距离淡出 (Fade out)
+            float dist = distance(viewPos.xz, WorldPos.xz);
+            float alpha = 1.0 - smoothstep(10.0, 400.0, dist);
+            color.a *= alpha;
+
+            if (color.a <= 0.0) discard;
+            FragColor = color;
+        }
+    )";
+
+    _gridShader.reset(new GLSLProgram);
+    _gridShader->attachVertexShader(gridVs);
+    _gridShader->attachFragmentShader(gridFs);
+    _gridShader->link();
+
+    // =============================================================
+    // 2. 程序化天空盒 Shader (Unity 默认风格)
+    // =============================================================
+    const char* skyVs = R"(
+        #version 330 core
+        layout (location = 0) in vec3 aPos;
+        out vec3 TexCoords;
+        uniform mat4 projection;
+        uniform mat4 view;
+
+        void main() {
+            TexCoords = aPos;
+            // 移除平移分量，让天空盒永远跟着相机
+            vec4 pos = projection * mat4(mat3(view)) * vec4(aPos, 1.0);
+            
+            // [技巧] 让天空盒永远在深度测试的最远处 (z = w, 透视除法后 z/w = 1.0)
+            gl_Position = pos.xyww; 
+        }
+    )";
+
+    const char* skyFs = R"(
+        #version 330 core
+        out vec4 FragColor;
+        in vec3 TexCoords;
+
+        void main() {
+            vec3 dir = normalize(TexCoords);
+            float y = dir.y;
+
+            // =========================================================
+            // [配色方案] 
+            // =========================================================
+            
+            // 1. 地面颜色 (Deep Dark Gray)
+            vec3 colGround = vec3(0.2, 0.2, 0.2); 
+
+            // 2. 地平线颜色 (Horizon Fog)
+            // [修改]: 稍微提亮一点，增加一点“厚重感”和不透明度
+            vec3 colHorizon = vec3(0.7, 0.75, 0.82); 
+
+            // 3. 天顶颜色 (Sky Zenith)
+            vec3 colZenith  = vec3(0.2, 0.45, 0.8); 
+
+            vec3 finalColor;
+
+            // =========================================================
+            // [混合逻辑] 
+            // =========================================================
+            
+            if (y < 0.0) {
+                // --- 地下部分 ---
+                
+                // [核心改进 1: 平滑过渡]
+                // 原代码这里使用了 colHorizon * 0.5，导致和上半部分产生接缝。
+                // 我们现在直接从 colHorizon 开始，确保 y=0 处无缝连接。
+
+                // [核心改进 2: 加大雾气密度]
+                // 我们不改变 -0.2 这个范围，而是改变混合曲线的"形状"。
+                // 原始线性混合会让地面黑得太快。
+                // 这里先算出线性因子 factorLinear (0.0 到 1.0)
+                float factorLinear = smoothstep(0.0, -0.2, y);
+                
+                // 使用 pow 函数处理因子。
+                // 0.4 的指数会让混合因子在接近 0 (地平线) 的地方停留更久，
+                // 从而让雾气颜色"渗"入地面更多，看起来雾更浓，但并没有扩大实际渲染范围。
+                float factorCurved = pow(factorLinear, 0.4); 
+
+                finalColor = mix(colHorizon, colGround, factorCurved); 
+            } 
+            else {
+                // --- 天空部分 ---
+                
+                // 同样为了增加雾气感，我们让天顶蓝色的出现稍微"迟"一点
+                // 0.5 的指数比原来的 0.7 更小，意味着白色雾气会向上延伸得更有力
+                float t = pow(y, 0.5); 
+                finalColor = mix(colHorizon, colZenith, t);
+            }
+
+            // [色调映射] (可选) 
+            // 加上轻微的 Gamma 矫正或 Tone Mapping 可以让雾气看起来更柔和
+            // finalColor = pow(finalColor, vec3(1.0/2.2)); 
+
+            FragColor = vec4(finalColor, 1.0);
+        }
+    )";
+
+    _skyboxShader.reset(new GLSLProgram);
+    _skyboxShader->attachVertexShader(skyVs);
+    _skyboxShader->attachFragmentShader(skyFs);
+    _skyboxShader->link();
+
+    // 2. 初始化模型资源
+    _gridPlane = GeometryFactory::createPlane(2.0f, 2.0f);
+    _skyboxCube = GeometryFactory::createCube(1.0f);
+
+    // 3. 初始化 OutlinePass (初始大小可以给 0 或窗口大小，后面 onResize 会修)
+    _outlinePass = std::make_unique<OutlinePass>(1920, 1080);
+}
+
+void Renderer::onResize(int width, int height) {
+    if (_outlinePass) {
+        _outlinePass->onResize(width, height);
+    }
+}
+
+void Renderer::render(const Scene& scene, Camera* camera, 
+                      GLuint targetFBO, int width, int height, 
+                      float contentScale,
+                      GameObject* selectedObj)
+{
+    // 1. 绑定目标 FBO
+    glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
+    glViewport(0, 0, width, height);
+
+    // 2. 清屏
+    glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+
+    // 3. 准备矩阵
+    glm::mat4 view = camera->getViewMatrix();
+    glm::mat4 proj = camera->getProjectionMatrix();
+    glm::vec3 viewPos = camera->transform.position;
+
+    // --- Pass 0: 天空盒 ---
+    drawSkybox(view, proj);
+
+    // --- Pass 1 & 2: 物体渲染 (光照 + 绘制) ---
+    drawSceneObjects(scene, view, proj, viewPos);
+
+    // --- Pass 2.5: 网格 ---
+    drawGrid(view, proj, viewPos);
+
+    // --- Pass 3: 描边 ---
+    if (selectedObj) {
+        // OutlinePass 需要传入宽高用于重新生成纹理
+        _outlinePass->render(selectedObj, camera, contentScale, width, height);
+        
+        // 恢复 FBO 绑定 (防止 OutlinePass 内部解绑)
+        glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
+    }
+
+    // 解绑
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+// === 下面是将 SceneRoaming::renderScene 中的逻辑拆分出来的私有函数 ===
+
+void Renderer::drawSkybox(const glm::mat4& view, const glm::mat4& proj) {
+    glDepthFunc(GL_LEQUAL);
+    _skyboxShader->use();
+    _skyboxShader->setUniformMat4("view", view);
+    _skyboxShader->setUniformMat4("projection", proj);
+    
+    glDisable(GL_CULL_FACE);
+    _skyboxCube->draw();
+    glEnable(GL_CULL_FACE);
+    
+    glDepthFunc(GL_LESS);
+}
+
+void Renderer::drawGrid(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    glDepthFunc(GL_LEQUAL);
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(-1.0f, -1.0f);
+    glDisable(GL_CULL_FACE);
+
+    _gridShader->use();
+    _gridShader->setUniformMat4("view", view);
+    _gridShader->setUniformMat4("projection", proj);
+    _gridShader->setUniformVec3("viewPos", viewPos);
+    
+    _gridPlane->draw();
+
+    glEnable(GL_CULL_FACE);
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    glDepthFunc(GL_LESS);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+}
+
+void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos) {
+    _mainShader->use();
+    _mainShader->setUniformMat4("projection", proj);
+    _mainShader->setUniformMat4("view", view);
+    _mainShader->setUniformVec3("viewPos", viewPos);
+
+    // 1. 收集光源 (Lighting Loop)
+    int dirCount = 0, pointCount = 0, spotCount = 0;
+    
+    for (const auto& go : scene.getGameObjects()) {
+        auto light = go->getComponent<LightComponent>();
+        if (light && light->enabled) {
+            // ... (复制 SceneRoaming 中的光源收集逻辑，注意变量名 go->transform) ...
+            // 注意：这里需要原封不动地把那段长长的 if/else light type 判断拷过来
+            // 并调用 _mainShader->setUniform...
+            std::string baseName;
+            if (light->type == LightType::Directional && dirCount < 2)
+            {
+                baseName = "dirLights[" + std::to_string(dirCount++) + "]";
+                glm::vec3 dir = go->transform.rotation * glm::vec3(0, 0, -1);
+                _mainShader->setUniformVec3(baseName + ".direction", dir);
+            }
+            else if (light->type == LightType::Point && pointCount < 4)
+            {
+                baseName = "pointLights[" + std::to_string(pointCount++) + "]";
+                _mainShader->setUniformVec3(baseName + ".position", go->transform.position);
+                _mainShader->setUniformFloat(baseName + ".constant", light->constant);
+                _mainShader->setUniformFloat(baseName + ".linear", light->linear);
+                _mainShader->setUniformFloat(baseName + ".quadratic", light->quadratic);
+
+                // 同步 Gizmo 颜色
+                if (auto mesh = go->getComponent<MeshComponent>()) {
+                    if (mesh->isGizmo) mesh->material.diffuse = light->color;
+                }
+            }
+            else if (light->type == LightType::Spot && spotCount < 4)
+            {
+                baseName = "spotLights[" + std::to_string(spotCount++) + "]";
+                _mainShader->setUniformVec3(baseName + ".position", go->transform.position);
+                glm::vec3 dir = go->transform.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+                _mainShader->setUniformVec3(baseName + ".direction", dir);
+                _mainShader->setUniformFloat(baseName + ".cutOff", light->cutOff);
+                _mainShader->setUniformFloat(baseName + ".outerCutOff", light->outerCutOff);
+                _mainShader->setUniformFloat(baseName + ".constant", light->constant);
+                _mainShader->setUniformFloat(baseName + ".linear", light->linear);
+                _mainShader->setUniformFloat(baseName + ".quadratic", light->quadratic);
+
+                if (auto mesh = go->getComponent<MeshComponent>()) {
+                    if (mesh->isGizmo) mesh->material.diffuse = light->color;
+                }
+            }
+
+            if (!baseName.empty())
+            {
+                _mainShader->setUniformVec3(baseName + ".color", light->color);
+                _mainShader->setUniformFloat(baseName + ".intensity", light->intensity);
+            }
+        }
+    }
+    _mainShader->setUniformInt("dirLightCount", dirCount);
+    _mainShader->setUniformInt("pointLightCount", pointCount);
+    _mainShader->setUniformInt("spotLightCount", spotCount);
+
+    // 2. 绘制物体 (Mesh Loop)
+    for (const auto& go : scene.getGameObjects()) {
+        auto meshComp = go->getComponent<MeshComponent>();
+        if (!meshComp || !meshComp->enabled) continue;
+        
+        auto lightComp = go->getComponent<LightComponent>();
+        
+        // 双面渲染处理
+        if (meshComp->doubleSided) glDisable(GL_CULL_FACE);
+
+        // ... (复制 SceneRoaming 中的材质设置和 ModelMatrix 计算逻辑) ...
+        // 材质与光照同步逻辑
+        // if (lightComp) {
+        //     meshComp->material.diffuse = lightComp->color;
+        //     meshComp->material.ambient = lightComp->color * 0.1f;
+        // }
+        
+        _mainShader->setUniformBool("isUnlit", meshComp->isGizmo);
+        _mainShader->setUniformVec3("material.ambient", meshComp->material.ambient);
+        _mainShader->setUniformVec3("material.diffuse", meshComp->material.diffuse);
+        _mainShader->setUniformVec3("material.specular", meshComp->material.specular);
+        _mainShader->setUniformFloat("material.shininess", meshComp->material.shininess);
+
+        // 计算 Model Matrix
+        glm::mat4 modelMatrix = go->transform.getLocalMatrix();
+        modelMatrix = modelMatrix * meshComp->model->transform.getLocalMatrix();
+
+        _mainShader->setUniformMat4("model", modelMatrix);
+        
+        meshComp->model->draw();
+
+        if (meshComp->doubleSided) glEnable(GL_CULL_FACE);
+    }
+}
+```
+
+./engine/renderer.h:
+```
+#pragma once
+
+#include <memory>
+#include <vector>
+#include <glad/gl.h>
+
+#include "scene.h"
+#include "base/camera.h"
+#include "base/glsl_program.h"
+#include "outline_pass.h"
+#include "geometry_factory.h"
+
+class Renderer
+{
+public:
+    Renderer();
+    ~Renderer();
+
+    // 初始化 Shader、天空盒、网格等资源
+    void init();
+
+    // 调整大小 (通知 OutlinePass 等)
+    void onResize(int width, int height);
+
+    // 核心渲染函数
+    // targetFBO: 传入 0 渲染到屏幕，传入 FBO ID 渲染到纹理
+    // selectedObj: 如果非空，则绘制描边 (Editor 模式用)
+    void render(const Scene& scene, Camera* camera, 
+                GLuint targetFBO, int width, int height,
+                float contentScale, 
+                GameObject* selectedObj = nullptr);
+
+private:
+    // --- Shader 资源 ---
+    std::unique_ptr<GLSLProgram> _mainShader;
+    std::unique_ptr<GLSLProgram> _gridShader;
+    std::unique_ptr<GLSLProgram> _skyboxShader;
+
+    // --- 全局模型 ---
+    std::shared_ptr<Model> _gridPlane;
+    std::shared_ptr<Model> _skyboxCube;
+
+    // --- Render Pass ---
+    std::unique_ptr<OutlinePass> _outlinePass;
+
+    // --- 内部绘制函数 ---
+    void drawSkybox(const glm::mat4& view, const glm::mat4& proj);
+    void drawGrid(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos);
+    void drawSceneObjects(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos);
+};
+```
+
+./engine/scene.cpp:
+```
+#include "scene.h"
+#include "resource_manager.h" // 如果需要加载默认图标
+
+GameObject* Scene::createCube()
+{
+    auto go = new GameObject("Cube");
+    // 使用 GeometryFactory 创建
+    auto meshComp = go->addComponent<MeshComponent>(GeometryFactory::createCube());
+    
+    // 初始化默认参数
+    meshComp->shapeType = MeshShapeType::Cube;
+    meshComp->params.size = 1.0f;
+    meshComp->material.diffuse = glm::vec3(0.8f);
+
+    // 存入容器
+    _gameObjects.push_back(std::unique_ptr<GameObject>(go));
+    return go;
+}
+
+GameObject* Scene::createPointLight()
+{
+    auto go = new GameObject("Point Light");
+    auto lightComp = go->addComponent<LightComponent>(LightType::Point);
+    lightComp->color = glm::vec3(1.0f, 1.0f, 0.0f);
+
+    // 光源可视化 (Gizmo)
+    auto meshComp = go->addComponent<MeshComponent>(GeometryFactory::createSphere(0.2f), true);
+    meshComp->shapeType = MeshShapeType::Sphere;
+    meshComp->params.radius = 0.2f;
+    meshComp->material.diffuse = lightComp->color;
+
+    _gameObjects.push_back(std::unique_ptr<GameObject>(go));
+    return go;
+}
+
+void Scene::createDefaultScene()
+{
+    // 创建默认的平行光 (Sun)
+    auto sun = new GameObject("Directional Light");
+    auto lightComp = sun->addComponent<LightComponent>(LightType::Directional);
+    
+    sun->transform.rotationEuler = glm::vec3(-50.0f, -30.0f, 0.0f);
+    sun->transform.setRotation(sun->transform.rotationEuler);
+
+    // 尝试加载 Gizmo 图标
+    try {
+        std::string arrowPath = "obj/arrow.obj"; 
+        auto arrowModel = ResourceManager::Get().getModel(arrowPath);
+        if (arrowModel) {
+            auto arrowMesh = sun->addComponent<MeshComponent>(arrowModel, true);
+            arrowMesh->shapeType = MeshShapeType::CustomOBJ;
+            strcpy(arrowMesh->params.objPath, arrowPath.c_str());
+            sun->transform.scale = glm::vec3(0.5f); 
+        }
+    } catch (...) {}
+
+    _gameObjects.push_back(std::unique_ptr<GameObject>(sun));
+}
+```
+
+./engine/scene.h:
+```
+#pragma once
+
+#include <vector>
+#include <memory>
+#include <algorithm>
+#include "scene_object.h" // 根据你的实际路径调整
+#include "geometry_factory.h"
+
+class Scene
+{
+public:
+    Scene() = default;
+    ~Scene() = default;
+
+    // --- 对象管理 ---
+    
+    // 获取所有对象 (供 Renderer 遍历)
+    const std::vector<std::unique_ptr<GameObject>>& getGameObjects() const { return _gameObjects; }
+
+    // 添加一个已经创建好的对象
+    void addGameObject(std::unique_ptr<GameObject> go) {
+        _gameObjects.push_back(std::move(go));
+    }
+
+    // 删除指定对象
+    void removeGameObject(GameObject* go) {
+        _gameObjects.erase(
+            std::remove_if(_gameObjects.begin(), _gameObjects.end(),
+                [go](const std::unique_ptr<GameObject>& p) { return p.get() == go; }),
+            _gameObjects.end());
+    }
+
+    // 清空场景
+    void clear() { _gameObjects.clear(); }
+
+    // --- 工厂方法 (从 SceneRoaming 迁移过来的逻辑) ---
+    
+    // 创建默认立方体
+    GameObject* createCube();
+    
+    // 创建点光源
+    GameObject* createPointLight();
+
+    // 创建默认场景 (比如初始化一个太阳)
+    void createDefaultScene();
+
+private:
+    std::vector<std::unique_ptr<GameObject>> _gameObjects;
+};
+```
+

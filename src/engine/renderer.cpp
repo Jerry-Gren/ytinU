@@ -556,10 +556,10 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
 
         // ... (复制 SceneRoaming 中的材质设置和 ModelMatrix 计算逻辑) ...
         // 材质与光照同步逻辑
-        if (lightComp) {
-            meshComp->material.diffuse = lightComp->color;
-            meshComp->material.ambient = lightComp->color * 0.1f;
-        }
+        // if (lightComp) {
+        //     meshComp->material.diffuse = lightComp->color;
+        //     meshComp->material.ambient = lightComp->color * 0.1f;
+        // }
         
         _mainShader->setUniformBool("isUnlit", meshComp->isGizmo);
         _mainShader->setUniformVec3("material.ambient", meshComp->material.ambient);

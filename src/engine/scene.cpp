@@ -44,13 +44,13 @@ void Scene::createDefaultScene()
 
     // 尝试加载 Gizmo 图标
     try {
-        std::string arrowPath = "obj/arrow.obj"; 
+        std::string arrowPath = "media/obj/arrow.obj";
         auto arrowModel = ResourceManager::Get().getModel(arrowPath);
         if (arrowModel) {
             auto arrowMesh = sun->addComponent<MeshComponent>(arrowModel, true);
             arrowMesh->shapeType = MeshShapeType::CustomOBJ;
             strcpy(arrowMesh->params.objPath, arrowPath.c_str());
-            sun->transform.scale = glm::vec3(0.5f); 
+            sun->transform.scale = glm::vec3(0.5f);
         }
     } catch (...) {}
 

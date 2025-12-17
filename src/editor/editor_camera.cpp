@@ -214,7 +214,7 @@ void EditorCamera::handleInput(const glm::vec3& scenePivot)
 
         if (isMMB) {
             // 鼠标中键：直接映射
-            float mouseSens = 0.005f; // 可以微调灵敏度
+            float mouseSens = 0.0015f; // 可以微调灵敏度
             targetDeltaX = -dx * mouseSens;
             targetDeltaY = -dy * mouseSens;
             

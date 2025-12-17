@@ -54,6 +54,10 @@ void OutlinePass::onResize(int width, int height)
 
 void OutlinePass::initFrameBuffer()
 {
+    GLint maxSamples;
+    glGetIntegerv(GL_MAX_SAMPLES, &maxSamples);
+    int samples = std::min(4, maxSamples); // 尝试用 4，如果不支持则用最大值
+
     // ==========================================
     // 1. 创建 MSAA FBO (渲染目标)
     // ==========================================
@@ -63,13 +67,13 @@ void OutlinePass::initFrameBuffer()
     // 创建多重采样颜色缓冲 (4 samples)
     glGenRenderbuffers(1, &_msaaColorBuffer);
     glBindRenderbuffer(GL_RENDERBUFFER, _msaaColorBuffer);
-    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_R8, _screenWidth, _screenHeight);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_R8, _screenWidth, _screenHeight);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, _msaaColorBuffer);
 
     // 创建多重采样深度缓冲 (必须匹配)
     glGenRenderbuffers(1, &_msaaDepthBuffer);
     glBindRenderbuffer(GL_RENDERBUFFER, _msaaDepthBuffer);
-    glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_DEPTH_COMPONENT24, _screenWidth, _screenHeight);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_DEPTH_COMPONENT24, _screenWidth, _screenHeight);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, _msaaDepthBuffer);
 
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)

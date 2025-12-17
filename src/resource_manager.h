@@ -24,7 +24,7 @@ public:
 
     // 加载或获取已缓存的模型
     // path: 相对路径，例如 "obj/bunny.obj"
-    std::shared_ptr<Model> getModel(const std::string& relPath);
+    std::shared_ptr<Model> getModel(const std::string& pathKey);
 
     // 扫描资源目录下所有的 .obj 文件 (用于 UI 显示)
     // rootDir: 资源根目录，例如 "../../media/"
@@ -32,6 +32,10 @@ public:
 
     // 获取扫描到的文件列表 (文件名, 相对路径)
     const std::vector<std::pair<std::string, std::string>>& getFileList() const { return _fileList; }
+
+    void shutdown() {
+        _modelCache.clear(); // 强制释放所有 Model shared_ptr
+    }
 
 private:
     ResourceManager() = default;

@@ -55,9 +55,18 @@ file(GLOB ENGINE_HDR ${SOURCE_PATH}/engine/*.h)
 file(GLOB ENGINE_SRC ${SOURCE_PATH}/engine/*.cpp)
 file(GLOB EDITOR_HDR ${SOURCE_PATH}/editor/*.h)
 file(GLOB EDITOR_SRC ${SOURCE_PATH}/editor/*.cpp)
+file(GLOB EDITOR_PANEL_HDR ${SOURCE_PATH}/editor/panels/*.h)
+file(GLOB EDITOR_PANEL_SRC ${SOURCE_PATH}/editor/panels/*.cpp)
 
 # Generate program
-add_executable(final_project ${BASE_HDR} ${BASE_SRC} ${PROJECT_HDR} ${PROJECT_SRC} ${ENGINE_HDR} ${ENGINE_SRC} ${EDITOR_HDR} ${EDITOR_SRC})
+add_executable(
+    final_project
+    ${BASE_HDR} ${BASE_SRC}
+    ${PROJECT_HDR} ${PROJECT_SRC}
+    ${ENGINE_HDR} ${ENGINE_SRC}
+    ${EDITOR_HDR} ${EDITOR_SRC}
+    ${EDITOR_PANEL_HDR} ${EDITOR_PANEL_SRC}
+)
 
 if(WIN32)
     set_target_properties(${PROJECT_NAME} PROPERTIES

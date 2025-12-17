@@ -20,8 +20,7 @@ Options getOptions(int argc, char* argv[]) {
     options.backgroundColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
 
     std::string exeDir = getExecutableDir();
-    std::filesystem::path assetPath = std::filesystem::path(exeDir) / "media";
-    options.assetRootDir = assetPath.string() + "/";
+    options.assetRootDir = exeDir + "/";
 
     std::cout << "[Info] Asset Root: " << options.assetRootDir << std::endl;
 
