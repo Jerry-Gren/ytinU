@@ -119,14 +119,19 @@ void Renderer::init() {
         vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir);
 
 		// 获取法线辅助函数
-		vec3 getNormal() {
-            // 归一化插值后的法线
+		vec3 getNormal(vec3 viewDir) {
             vec3 n = normalize(Normal);
-            // 只有当物体明确开启了双面渲染(isDoubleSided == true)，
-            // 并且我们正在渲染背面(!gl_FrontFacing)时，才反转法线。
-            // 对于普通的球体/立方体，这段逻辑将被跳过，从而避免了 macOS 上的误判问题。
-            if (isDoubleSided && !gl_FrontFacing) {
-                n = -n; 
+            if (isDoubleSided) {
+                // 如果法线和视线方向的点积小于0，说明法线背对相机
+                // (注意：viewDir 是从 FragPos 指向 相机，所以我们看法线是否主要指向相机)
+                // 正常情况下 dot(n, viewDir) > 0 代表面朝向我们。
+                // 如果 < 0，说明原本的法线是指向内部的（或者我们在看背面），需要翻转。
+                
+                // *但在你的场景中，症状是“外侧变暗”，说明外侧法线被错误翻转了。*
+                // 我们用更稳健的逻辑：我们希望最终用于光照的法线必须朝向相机一侧。
+                if (dot(n, viewDir) < 0.0) {
+                    n = -n;
+                }
             }
             return n;
         }
@@ -136,9 +141,9 @@ void Renderer::init() {
                 FragColor = vec4(material.diffuse, 1.0); 
                 return;
             }
-            
-            vec3 norm = getNormal();
+
             vec3 viewDir = normalize(viewPos - FragPos);
+            vec3 norm = getNormal(viewDir);
             
             vec3 result = vec3(0.0);
 
