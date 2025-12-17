@@ -98,6 +98,7 @@ void Renderer::init() {
 
         uniform bool isUnlit;
         uniform bool isDoubleSided;
+        uniform bool fixDoubleSide;
 
         uniform vec3 viewPos;
         uniform Material material;
@@ -120,12 +121,19 @@ void Renderer::init() {
 
 		// 获取法线辅助函数
 		vec3 getNormal() {
-            // 归一化插值后的法线
             vec3 n = normalize(Normal);
-            // 只有当物体明确开启了双面渲染(isDoubleSided == true)，
-            // 并且我们正在渲染背面(!gl_FrontFacing)时，才反转法线。
-            // 对于普通的球体/立方体，这段逻辑将被跳过，从而避免了 macOS 上的误判问题。
-            if (isDoubleSided && !gl_FrontFacing) {
+            
+            // 获取当前的面向状态
+            bool isFront = gl_FrontFacing;
+            
+            // [macOS 补丁]
+            // 如果开启修复，我们强制反转“由于某种原因被判定为背面但实际上可见”的面
+            if (fixDoubleSide) {
+                isFront = !isFront;
+            }
+
+            // 只有当开启双面，且判定为背面时，才反转法线
+            if (isDoubleSided && !isFront) {
                 n = -n; 
             }
             return n;
@@ -492,15 +500,12 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
 
     // Fix for macOS
 #ifdef __APPLE__
-    // macOS 特殊处理：由于投影矩阵或驱动层的差异，视觉上的环绕顺序被翻转了
-    // 所以告诉 OpenGL：在这个平台上，顺时针 (CW) 才是正面
-    glFrontFace(GL_CW); 
+    _mainShader->setUniformBool("fixDoubleSide", true);
 #else
-    // Windows / Linux 标准 OpenGL 行为：
-    // 逆时针 (CCW) 是正面。
-    // 如果你在 Windows 上也设为 CW，物体就会“里外翻转”或直接消失。
-    glFrontFace(GL_CCW);
+    _mainShader->setUniformBool("fixDoubleSide", false);
 #endif
+
+    glFrontFace(GL_CCW);
 
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
