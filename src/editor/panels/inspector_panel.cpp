@@ -151,7 +151,7 @@ void InspectorPanel::drawComponentUI(Component *comp)
         
         if (canFlatShade) {
             ImGui::SameLine();
-            if (ImGui::Checkbox("Split Vertices", &mesh->useFlatShade)) {
+            if (ImGui::Checkbox("Flat Shade", &mesh->useFlatShade)) {
                 needRebuild = true;
             }
         }
@@ -285,14 +285,15 @@ void InspectorPanel::drawComponentUI(Component *comp)
                         const char* relPath = (const char*)payload->Data;
                     
                         try {
-                            auto newModel = ResourceManager::Get().getModel(relPath,mesh->useFlatShade); // getModel 内部处理拼接
+                            bool initialFlatState = false;
+                            auto newModel = ResourceManager::Get().getModel(relPath, initialFlatState); // getModel 内部处理拼接
 
                             if (newModel) {
                                 mesh->setMesh(newModel);
                                 // 导入模型一般预期都是清空之前的状态
                                 mesh->isGizmo = false;
                                 mesh->doubleSided = false;
-                                mesh->useFlatShade = false;
+                                mesh->useFlatShade = initialFlatState;
                                 // 2. 更新 UI 文字 (显示相对路径，比较短，好看)
                                 strncpy(mesh->params.objPath, relPath, sizeof(mesh->params.objPath) - 1);
                                 mesh->params.objPath[sizeof(mesh->params.objPath) - 1] = '\0';
