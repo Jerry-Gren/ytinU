@@ -98,7 +98,7 @@ void Renderer::init() {
 
         uniform bool isUnlit;
         uniform bool isDoubleSided;
-        uniform bool fixDoubleSide;
+        uniform bool isDebug;
 
         uniform vec3 viewPos;
         uniform Material material;
@@ -121,19 +121,12 @@ void Renderer::init() {
 
 		// 获取法线辅助函数
 		vec3 getNormal() {
+            // 归一化插值后的法线
             vec3 n = normalize(Normal);
-            
-            // 获取当前的面向状态
-            bool isFront = gl_FrontFacing;
-            
-            // [macOS 补丁]
-            // 如果开启修复，我们强制反转“由于某种原因被判定为背面但实际上可见”的面
-            if (fixDoubleSide) {
-                isFront = !isFront;
-            }
-
-            // 只有当开启双面，且判定为背面时，才反转法线
-            if (isDoubleSided && !isFront) {
+            // 只有当物体明确开启了双面渲染(isDoubleSided == true)，
+            // 并且我们正在渲染背面(!gl_FrontFacing)时，才反转法线。
+            // 对于普通的球体/立方体，这段逻辑将被跳过，从而避免了 macOS 上的误判问题。
+            if (isDoubleSided && !gl_FrontFacing) {
                 n = -n; 
             }
             return n;
@@ -160,6 +153,14 @@ void Renderer::init() {
                 result += CalcSpotLight(spotLights[i], norm, FragPos, viewDir);
 
             FragColor = vec4(result, 1.0);
+
+            if (isDebug) {
+                if (gl_FrontFacing) {
+                    FragColor = vec4(1.0, 0.4, 0.4, 1.0); // 红
+                } else {
+                    FragColor = vec4(0.4, 1.0, 0.4, 1.0); // 绿
+                }
+            }
         }
 
         // --- 函数实现 ---
@@ -498,12 +499,7 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
     _mainShader->setUniformMat4("view", view);
     _mainShader->setUniformVec3("viewPos", viewPos);
 
-    // Fix for macOS
-#ifdef __APPLE__
-    _mainShader->setUniformBool("fixDoubleSide", true);
-#else
-    _mainShader->setUniformBool("fixDoubleSide", false);
-#endif
+    _mainShader->setUniformBool("isDebug", true);
 
     glFrontFace(GL_CCW);
 
