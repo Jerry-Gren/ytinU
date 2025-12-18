@@ -1,6 +1,6 @@
 #pragma once
 #include "panel.h"
-#include "scene_object.h"
+#include "engine/scene_object.h"
 #include "engine/scene.h"
 
 class InspectorPanel : public Panel {

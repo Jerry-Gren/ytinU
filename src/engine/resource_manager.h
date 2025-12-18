@@ -5,7 +5,7 @@
 #include <memory>
 #include <vector>
 #include <filesystem>
-#include "model.h"
+#include "engine/model.h"
 
 class ResourceManager
 {

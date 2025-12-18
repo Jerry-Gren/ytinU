@@ -1,6 +1,6 @@
 #include "inspector_panel.h"
-#include "geometry_factory.h"
-#include "resource_manager.h"
+#include "engine/geometry_factory.h"
+#include "engine/resource_manager.h"
 #include <imgui.h>
 #include <glm/gtc/type_ptr.hpp>
 

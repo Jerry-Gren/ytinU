@@ -7,7 +7,7 @@
 
 #include "base/glsl_program.h"
 #include "base/camera.h"
-#include "model.h"
+#include "engine/model.h"
 #include "scene_object.h" // 为了访问 GameObject
 
 class OutlinePass

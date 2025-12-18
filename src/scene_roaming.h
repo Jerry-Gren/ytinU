@@ -12,9 +12,9 @@
 #include "editor/panels/inspector_panel.h"
 #include "editor/panels/project_panel.h"
 #include "editor/panels/scene_view_panel.h"
-#include "scene_object.h"
-#include "outline_pass.h"
-#include "resource_manager.h"
+#include "engine/scene_object.h"
+#include "engine/outline_pass.h"
+#include "engine/resource_manager.h"
 
 class SceneRoaming : public Application
 {

@@ -1,6 +1,6 @@
 #pragma once
 #include "panel.h"
-#include "resource_manager.h"
+#include "engine/resource_manager.h"
 
 class ProjectPanel : public Panel {
 public:

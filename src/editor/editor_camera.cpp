@@ -1,6 +1,6 @@
 #include "editor_camera.h"
 #include "base/camera.h"
-#include "scene_object.h" // 为了访问 GameObject 的 Transform
+#include "engine/scene_object.h" // 为了访问 GameObject 的 Transform
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <GLFW/glfw3.h>

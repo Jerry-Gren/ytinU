@@ -3,7 +3,7 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include "scene_roaming.h"
-#include "geometry_factory.h"
+#include "engine/geometry_factory.h"
 #include "ImGuiFileDialog.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/easing.hpp>

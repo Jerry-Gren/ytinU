@@ -8,7 +8,7 @@
 #include <atomic>
 
 #include "base/transform.h"
-#include "model.h"
+#include "engine/model.h"
 #include "light_structs.h"
 
 enum class MeshShapeType
