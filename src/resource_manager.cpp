@@ -67,13 +67,16 @@ void ResourceManager::scanDirectory(const std::string& rootDir)
     }
 }
 
-std::shared_ptr<Model> ResourceManager::getModel(const std::string& pathKey)
+std::shared_ptr<Model> ResourceManager::getModel(const std::string& pathKey, bool useFlatShade)
 {
-    std::string key = pathKey;
-    std::replace(key.begin(), key.end(), '\\', '/');
+    std::string cleanPath = pathKey;
+    std::replace(cleanPath.begin(), cleanPath.end(), '\\', '/');
+
+    std::string cacheKey = cleanPath;
+    if (useFlatShade) cacheKey += ":useFlatShade";
 
     // 1. 检查缓存 (Key 是相对路径，比如 "assets/sphere.obj")
-    auto it = _modelCache.find(key);
+    auto it = _modelCache.find(cacheKey);
     if (it != _modelCache.end())
     {
         return it->second;
@@ -81,7 +84,7 @@ std::shared_ptr<Model> ResourceManager::getModel(const std::string& pathKey)
 
     // 2. 缓存未命中，准备加载
     // [核心修复] 获取硬盘上的绝对路径
-    std::string fullPath = getFullPath(key);
+    std::string fullPath = getFullPath(cleanPath);
 
     if (!std::filesystem::exists(fullPath)) {
         std::cerr << "[ResourceManager] Error: File not found: " << fullPath << std::endl;
@@ -93,10 +96,10 @@ std::shared_ptr<Model> ResourceManager::getModel(const std::string& pathKey)
 
     try {
         // 3. 使用【绝对路径】去打开文件
-        std::shared_ptr<Model> newModel = std::make_shared<Model>(fullPath);
+        std::shared_ptr<Model> newModel = std::make_shared<Model>(fullPath, useFlatShade);
         
         // 4. 存入缓存 (Key 依然是【相对路径】，方便下次查找)
-        _modelCache[key] = newModel;
+        _modelCache[cacheKey] = newModel;
         
         return newModel;
     }

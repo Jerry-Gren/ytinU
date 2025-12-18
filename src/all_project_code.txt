@@ -406,8 +406,7 @@ Options getOptions(int argc, char* argv[]) {
     options.backgroundColor = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
 
     std::string exeDir = getExecutableDir();
-    std::filesystem::path assetPath = std::filesystem::path(exeDir) / "media";
-    options.assetRootDir = assetPath.string() + "/";
+    options.assetRootDir = exeDir + "/";
 
     std::cout << "[Info] Asset Root: " << options.assetRootDir << std::endl;
 
@@ -1538,6 +1537,7 @@ public:
 ```
 #include "resource_manager.h"
 #include <iostream>
+#include <algorithm>
 
 ResourceManager& ResourceManager::Get()
 {
@@ -1575,33 +1575,42 @@ void ResourceManager::scanDirectory(const std::string& rootDir)
 {
     _fileList.clear();
     namespace fs = std::filesystem;
-    if (!fs::exists(rootDir)) return;
+    if (rootDir.empty() || !fs::exists(rootDir) || !fs::is_directory(rootDir)) return;
 
     for (const auto& entry : fs::recursive_directory_iterator(rootDir))
     {
         if (entry.is_regular_file())
         {
             std::string ext = entry.path().extension().string();
-            // 转小写比较...
-            if (ext == ".obj" || ext == ".OBJ")
+            std::transform(ext.begin(), ext.end(), ext.begin(), 
+                           [](unsigned char c){ return std::tolower(c); });
+            if (ext == ".obj")
             {
-                std::string fullPath = entry.path().string();
                 std::string filename = entry.path().filename().string();
                 
-                // [关键] 我们计算相对路径存起来，方便存盘
-                // 这里简单存 filename 也可以，或者 path relative_to root
-                std::string relPath = fs::relative(entry.path(), rootDir).string();
+                std::string storePath;
+                try {
+                    // 尝试计算相对路径
+                    storePath = fs::relative(entry.path(), rootDir).string();
+                } catch (const fs::filesystem_error& e) {
+                    // 如果无法计算相对路径（比如跨盘符），则退化为存储绝对路径
+                    storePath = entry.path().string();
+                }
+                std::replace(storePath.begin(), storePath.end(), '\\', '/');
                 
-                _fileList.push_back({filename, relPath});
+                _fileList.push_back({filename, storePath});
             }
         }
     }
 }
 
-std::shared_ptr<Model> ResourceManager::getModel(const std::string& relPath)
+std::shared_ptr<Model> ResourceManager::getModel(const std::string& pathKey)
 {
+    std::string key = pathKey;
+    std::replace(key.begin(), key.end(), '\\', '/');
+
     // 1. 检查缓存 (Key 是相对路径，比如 "assets/sphere.obj")
-    auto it = _modelCache.find(relPath);
+    auto it = _modelCache.find(key);
     if (it != _modelCache.end())
     {
         return it->second;
@@ -1609,7 +1618,12 @@ std::shared_ptr<Model> ResourceManager::getModel(const std::string& relPath)
 
     // 2. 缓存未命中，准备加载
     // [核心修复] 获取硬盘上的绝对路径
-    std::string fullPath = getFullPath(relPath);
+    std::string fullPath = getFullPath(key);
+
+    if (!std::filesystem::exists(fullPath)) {
+        std::cerr << "[ResourceManager] Error: File not found: " << fullPath << std::endl;
+        return nullptr; // 或者返回一个紫黑格子的 "ErrorModel"
+    }
 
     // [调试] 打印一下路径，确认拼对了吗
     // std::cout << "Loading Model: " << fullPath << std::endl;
@@ -1619,12 +1633,12 @@ std::shared_ptr<Model> ResourceManager::getModel(const std::string& relPath)
         std::shared_ptr<Model> newModel = std::make_shared<Model>(fullPath);
         
         // 4. 存入缓存 (Key 依然是【相对路径】，方便下次查找)
-        _modelCache[relPath] = newModel; 
+        _modelCache[key] = newModel;
         
         return newModel;
     }
     catch (std::exception& e) {
-        std::cerr << "ResourceManager Failed: " << e.what() << std::endl;
+        std::cerr << "[ResourceManager] Failed to load model: " << e.what() << std::endl;
         return nullptr;
     }
 }
@@ -1658,7 +1672,7 @@ public:
 
     // 加载或获取已缓存的模型
     // path: 相对路径，例如 "obj/bunny.obj"
-    std::shared_ptr<Model> getModel(const std::string& relPath);
+    std::shared_ptr<Model> getModel(const std::string& pathKey);
 
     // 扫描资源目录下所有的 .obj 文件 (用于 UI 显示)
     // rootDir: 资源根目录，例如 "../../media/"
@@ -1975,7 +1989,7 @@ void SceneRoaming::initImGui()
     // ImGui 默认字体是位图字体，直接缩放会模糊。
     // 强烈建议加载一个 TTF 字体并指定像素大小。
     // Windows 路径示例 (你可以换成你的项目内的字体路径 "media/fonts/arial.ttf")
-    std::string fontPath = getAssetFullPath("fonts/Roboto-Regular.ttf");
+    std::string fontPath = getAssetFullPath("media/fonts/Roboto-Regular.ttf");
     // 如果没有字体文件，可以用 Windows 自带的，或者暂时忽略字体清晰度
     // fontPath = "C:\\Windows\\Fonts\\segoeui.ttf"; 
     std::cout << "[Info] Attempting to load font from: " << fontPath << std::endl;
@@ -2072,6 +2086,10 @@ void SceneRoaming::renderFrame()
     // 5. 提交 ImGui 绘制数据
     // =========================================================
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    if (_scene) {
+        _scene->destroyMarkedObjects();
+    }
 }
 
 void SceneRoaming::renderUI()
@@ -3216,7 +3234,7 @@ void InspectorPanel::onImGuiRender(GameObject*& selectedObject, Scene* sceneCont
 
         if (shouldDeleteObj && sceneContext)
         {
-            sceneContext->removeGameObject(selectedObject);
+            sceneContext->markForDestruction(selectedObject);
             selectedObject = nullptr;
             // 立即结束当前 Frame 的绘制，防止访问野指针
             ImGui::End(); 
@@ -3810,9 +3828,8 @@ void SceneViewPanel::onInputUpdate(float dt, Scene* scene, GameObject*& selected
 {
     // 如果键盘正被 UI 占用（例如正在输入文字），不处理 3D 快捷键
     if (ImGui::GetIO().WantCaptureKeyboard) return;
-    
-    // 更新相机
-    _cameraController->update(dt);
+
+    _isControlling = _cameraController->isControlling();
 
     // 快捷键 (F 聚焦)
     // 这里需要 GLFW 窗口句柄来检测按键吗？ ImGui 提供了 IsKeyPressed
@@ -3833,10 +3850,10 @@ void SceneViewPanel::onInputUpdate(float dt, Scene* scene, GameObject*& selected
         _cameraController->switchToView(glm::vec3(0, 1, 0));
     }
 
-    // 鼠标输入
-    if (_isHovered || _isFocused) {
-        _cameraController->handleInput();
+    if (_isHovered || _isFocused || _isControlling) {
+        _cameraController->handleInput(); 
     }
+    _cameraController->update(dt);
 
     // 拾取逻辑
     if (_isHovered && ImGui::IsMouseClicked(0) && !ImGui::IsKeyDown(ImGuiKey_LeftAlt)) {
@@ -3946,7 +3963,7 @@ public:
     // 2. [关键修复] 必须覆盖基类的纯虚函数，否则此类为抽象类
     // 给一个空实现即可，因为我们不会通过 Panel* 多态指针来调用这个函数
     void onImGuiRender() override {}
-    
+
     // 处理输入 (键盘/鼠标)
     // 之前在 SceneRoaming::handleInput 里的逻辑移到这里
     void onInputUpdate(float dt, Scene* scene, GameObject*& selectedObject);
@@ -3971,6 +3988,7 @@ private:
     ImVec2 _viewportSize = {0, 0};
     bool _isHovered = false;
     bool _isFocused = false;
+    bool _isControlling = false;
 
     // 内部辅助
     void initFBO(int width, int height);
@@ -4080,6 +4098,8 @@ void Renderer::init() {
         #define NR_SPOT_LIGHTS 4
 
         uniform bool isUnlit;
+        uniform bool isDoubleSided;
+        uniform bool isDebug;
 
         uniform vec3 viewPos;
         uniform Material material;
@@ -4104,9 +4124,11 @@ void Renderer::init() {
 		vec3 getNormal() {
             // 归一化插值后的法线
             vec3 n = normalize(Normal);
-            // gl_FrontFacing 是内置变量：如果是正面为 true，背面为 false
-            if (!gl_FrontFacing) {
-                n = -n; // 如果是背面，把法线反过来
+            // 只有当物体明确开启了双面渲染(isDoubleSided == true)，
+            // 并且我们正在渲染背面(!gl_FrontFacing)时，才反转法线。
+            // 对于普通的球体/立方体，这段逻辑将被跳过，从而避免了 macOS 上的误判问题。
+            if (isDoubleSided && !gl_FrontFacing) {
+                n = -n; 
             }
             return n;
         }
@@ -4132,6 +4154,14 @@ void Renderer::init() {
                 result += CalcSpotLight(spotLights[i], norm, FragPos, viewDir);
 
             FragColor = vec4(result, 1.0);
+
+            if (isDebug) {
+                if (gl_FrontFacing) {
+                    FragColor = vec4(1.0, 0.4, 0.4, 1.0); // 红
+                } else {
+                    FragColor = vec4(0.4, 1.0, 0.4, 1.0); // 绿
+                }
+            }
         }
 
         // --- 函数实现 ---
@@ -4470,6 +4500,13 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
     _mainShader->setUniformMat4("view", view);
     _mainShader->setUniformVec3("viewPos", viewPos);
 
+    _mainShader->setUniformBool("isDebug", true);
+
+    glFrontFace(GL_CCW);
+
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+
     // 1. 收集光源 (Lighting Loop)
     int dirCount = 0, pointCount = 0, spotCount = 0;
     
@@ -4545,6 +4582,7 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         // }
         
         _mainShader->setUniformBool("isUnlit", meshComp->isGizmo);
+        _mainShader->setUniformBool("isDoubleSided", meshComp->doubleSided);
         _mainShader->setUniformVec3("material.ambient", meshComp->material.ambient);
         _mainShader->setUniformVec3("material.diffuse", meshComp->material.diffuse);
         _mainShader->setUniformVec3("material.specular", meshComp->material.specular);
@@ -4665,17 +4703,42 @@ void Scene::createDefaultScene()
 
     // 尝试加载 Gizmo 图标
     try {
-        std::string arrowPath = "obj/arrow.obj"; 
+        std::string arrowPath = "media/obj/arrow.obj";
         auto arrowModel = ResourceManager::Get().getModel(arrowPath);
         if (arrowModel) {
             auto arrowMesh = sun->addComponent<MeshComponent>(arrowModel, true);
             arrowMesh->shapeType = MeshShapeType::CustomOBJ;
             strcpy(arrowMesh->params.objPath, arrowPath.c_str());
-            sun->transform.scale = glm::vec3(0.5f); 
+            sun->transform.scale = glm::vec3(0.5f);
         }
     } catch (...) {}
 
     _gameObjects.push_back(std::unique_ptr<GameObject>(sun));
+}
+
+void Scene::markForDestruction(GameObject* go)
+{
+    // 检查是否已经在队列中，防止重复添加
+    if (std::find(_killQueue.begin(), _killQueue.end(), go) == _killQueue.end()) {
+        _killQueue.push_back(go);
+    }
+}
+
+void Scene::destroyMarkedObjects()
+{
+    if (_killQueue.empty()) return;
+
+    for (GameObject* go : _killQueue)
+    {
+        // 执行真正的物理删除
+        _gameObjects.erase(
+            std::remove_if(_gameObjects.begin(), _gameObjects.end(),
+                [go](const std::unique_ptr<GameObject>& p) { 
+                    return p.get() == go; 
+                }),
+            _gameObjects.end());
+    }
+    _killQueue.clear();
 }
 ```
 
@@ -4727,8 +4790,14 @@ public:
     // 创建默认场景 (比如初始化一个太阳)
     void createDefaultScene();
 
+    void markForDestruction(GameObject* go);
+
+    void destroyMarkedObjects();
+
 private:
     std::vector<std::unique_ptr<GameObject>> _gameObjects;
+
+    std::vector<GameObject*> _killQueue;
 };
 ```
 

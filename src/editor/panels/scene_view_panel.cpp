@@ -134,6 +134,13 @@ void SceneViewPanel::onInputUpdate(float dt, Scene* scene, GameObject*& selected
         _cameraController->switchToView(glm::vec3(0, 1, 0));
     }
 
+    // Delete
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete) && selectedObject)
+    {
+        if (scene) scene->markForDestruction(selectedObject);
+        selectedObject = nullptr; 
+    }
+
     if (_isHovered || _isFocused || _isControlling) {
         _cameraController->handleInput(); 
     }

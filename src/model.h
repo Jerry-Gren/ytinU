@@ -11,7 +11,7 @@
 class Model
 {
 public:
-    Model(const std::string &filepath);
+    Model(const std::string &filepath, bool useFlatShade);
 
     Model(const std::vector<Vertex> &vertices, const std::vector<uint32_t> &indices);
 
@@ -28,9 +28,11 @@ public:
     size_t getFaceCount() const;
     BoundingBox getBoundingBox() const;
 
-    virtual void draw() const;
+    void initGL();
 
-    virtual void drawBoundingBox() const;
+    virtual void draw();
+
+    virtual void drawBoundingBox();
 
     const std::vector<uint32_t> &getIndices() const
     {
@@ -64,6 +66,8 @@ protected:
     GLuint _boxVao = 0;
     GLuint _boxVbo = 0;
     GLuint _boxEbo = 0;
+
+    bool _isUploaded = false;
 
     void computeBoundingBox();
 

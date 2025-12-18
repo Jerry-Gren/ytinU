@@ -201,6 +201,18 @@ void SceneRoaming::renderFrame()
     // =========================================================
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
+    // 在物理删除之前，检查选中物体是否即将死亡
+    if (_scene && _selectedObject)
+    {
+        // 如果当前选中的物体在删除队列里，说明它将在下面这行代码中变为野指针
+        if (_scene->isMarkedForDestruction(_selectedObject))
+        {
+            _selectedObject = nullptr; // 强制取消选中，保护指针安全
+            // 可选：打印一条日志
+            std::cout << "[System] Auto-deselected object pending destruction." << std::endl;
+        }
+    }
+
     if (_scene) {
         _scene->destroyMarkedObjects();
     }

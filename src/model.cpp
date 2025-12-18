@@ -5,13 +5,12 @@
 #include <iostream>
 #include <limits>
 
-Model::Model(const std::string &filepath)
+Model::Model(const std::string &filepath, bool useFlatShade)
+    : _isUploaded(false)
 {
-	while (glGetError() != GL_NO_ERROR);
-	
     // 1. 调用 OBJLoader 获取数据
     // 这里利用了 C++ 的返回值优化 (RVO)，不会产生不必要的深拷贝
-    MeshData data = OBJLoader::load(filepath);
+    MeshData data = OBJLoader::load(filepath, useFlatShade);
 
     // 2. 将数据移动到 Model 的成员变量中
     _vertices = std::move(data.vertices);
@@ -19,32 +18,12 @@ Model::Model(const std::string &filepath)
 
     // 3. 后续初始化流程保持不变
     computeBoundingBox();
-    initGLResources();
-    initBoxGLResources();
-
-    GLenum error = glGetError();
-    if (error != GL_NO_ERROR)
-    {
-        cleanup();
-        throw std::runtime_error("OpenGL Error: " + std::to_string(error));
-    }
 }
 
 Model::Model(const std::vector<Vertex> &vertices, const std::vector<uint32_t> &indices)
-    : _vertices(vertices), _indices(indices)
+    : _vertices(vertices), _indices(indices), _isUploaded(false)
 {
-	while (glGetError() != GL_NO_ERROR);
-
     computeBoundingBox();
-    initGLResources();
-    initBoxGLResources();
-
-    GLenum error = glGetError();
-    if (error != GL_NO_ERROR)
-    {
-        cleanup();
-        throw std::runtime_error("OpenGL Error: " + std::to_string(error));
-    }
 }
 
 Model::Model(Model &&rhs) noexcept
@@ -71,15 +50,40 @@ BoundingBox Model::getBoundingBox() const
     return _boundingBox;
 }
 
-void Model::draw() const
+void Model::initGL()
 {
+    if (_isUploaded) return; // 防止重复初始化
+
+    // 确保此时有 OpenGL 上下文 (如果没有，glGetError 或 glGen* 会报错/崩溃，但此时通常都在渲染循环里了)
+    initGLResources();
+    initBoxGLResources();
+
+    _isUploaded = true;
+}
+
+void Model::draw()
+{
+    if (!_isUploaded) {
+        // const_cast 是一种妥协，或者将 initGL 声明为 const 并把内部变量设为 mutable
+        // 这里最优雅的方式是将 _isUploaded 设为 mutable (已在 .h 中完成)
+        const_cast<Model*>(this)->initGL();
+    }
+
+    if (_vao == 0) return; // 如果初始化失败，防止崩溃
+
     glBindVertexArray(_vao);
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(_indices.size()), GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
 }
 
-void Model::drawBoundingBox() const
+void Model::drawBoundingBox()
 {
+    if (!_isUploaded) {
+         const_cast<Model*>(this)->initGL();
+    }
+
+    if (_boxVao == 0) return;
+    
     glBindVertexArray(_boxVao);
     glDrawElements(GL_LINES, 24, GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);

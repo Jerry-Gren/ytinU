@@ -79,7 +79,7 @@ void InspectorPanel::drawComponents(GameObject* obj)
     Component *compToRemove = nullptr;
     for (auto &comp : obj->components)
     {
-        ImGui::PushID(comp.get());
+        ImGui::PushID(comp->getInstanceID());
 
         std::string headerName = "Unknown Component";
         if (comp->getType() == ComponentType::MeshRenderer) headerName = "Mesh Renderer";
@@ -137,10 +137,24 @@ void InspectorPanel::drawComponentUI(Component *comp)
     if (comp->getType() == ComponentType::MeshRenderer)
     {
         auto mesh = static_cast<MeshComponent *>(comp);
+        bool needRebuild = false;
 
         ImGui::Checkbox("Is Gizmo (Unlit)", &mesh->isGizmo);
         ImGui::SameLine();
         ImGui::Checkbox("Double Sided", &mesh->doubleSided);
+
+        bool canFlatShade = (mesh->shapeType == MeshShapeType::Cylinder || 
+                             mesh->shapeType == MeshShapeType::Cone ||
+                             mesh->shapeType == MeshShapeType::Prism || 
+                             mesh->shapeType == MeshShapeType::Frustum ||
+                             mesh->shapeType == MeshShapeType::CustomOBJ);
+        
+        if (canFlatShade) {
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Split Vertices", &mesh->useFlatShade)) {
+                needRebuild = true;
+            }
+        }
 
         // Mesh Filter 设置区域
         ImGui::Separator();
@@ -150,15 +164,40 @@ void InspectorPanel::drawComponentUI(Component *comp)
         const char *shapeNames[] = {"Cube", "Sphere", "Cylinder", "Cone", "Prism", "Frustum", "Plane", "Custom OBJ"};
         int currentItem = (int)mesh->shapeType;
 
-        bool needRebuild = false;
-
         if (ImGui::Combo("Shape", &currentItem, shapeNames, IM_ARRAYSIZE(shapeNames)))
         {
             mesh->shapeType = (MeshShapeType)currentItem;
             
-            // 如果切到了 Plane，自动开启双面；切到别的（如 Cube），自动关闭
-            if (mesh->shapeType == MeshShapeType::Plane) mesh->doubleSided = true;
-            else mesh->doubleSided = false;
+            switch (mesh->shapeType) {
+                case MeshShapeType::Cube:
+                    mesh->doubleSided = false;
+                    break;
+                case MeshShapeType::Sphere:
+                    mesh->doubleSided = false;
+                    break;
+                case MeshShapeType::Cylinder:
+                    mesh->doubleSided = false;
+                    mesh->useFlatShade = false;
+                    break;
+                case MeshShapeType::Cone:
+                    mesh->doubleSided = false;
+                    mesh->useFlatShade = false;
+                    break;
+                case MeshShapeType::Prism:
+                    mesh->doubleSided = false;
+                    mesh->useFlatShade = true; // 硬边
+                    break;
+                case MeshShapeType::Frustum:
+                    mesh->doubleSided = false;
+                    mesh->useFlatShade = true; // 硬边
+                    break;
+                case MeshShapeType::Plane:
+                    mesh->doubleSided = true;
+                    break;
+                default:
+                    mesh->doubleSided = false;
+                    break;
+            }
             
             if (mesh->shapeType != MeshShapeType::CustomOBJ)
             {
@@ -245,15 +284,18 @@ void InspectorPanel::drawComponentUI(Component *comp)
                        // 1. 获取 Payload (相对路径)
                         const char* relPath = (const char*)payload->Data;
                     
-                        // 2. 更新 UI 文字 (显示相对路径，比较短，好看)
-                        strncpy(mesh->params.objPath, relPath, sizeof(mesh->params.objPath) - 1);
-                        mesh->params.objPath[sizeof(mesh->params.objPath) - 1] = '\0';
-
                         try {
-                            auto newModel = ResourceManager::Get().getModel(relPath); // getModel 内部处理拼接
+                            auto newModel = ResourceManager::Get().getModel(relPath,mesh->useFlatShade); // getModel 内部处理拼接
 
                             if (newModel) {
                                 mesh->setMesh(newModel);
+                                // 导入模型一般预期都是清空之前的状态
+                                mesh->isGizmo = false;
+                                mesh->doubleSided = false;
+                                mesh->useFlatShade = false;
+                                // 2. 更新 UI 文字 (显示相对路径，比较短，好看)
+                                strncpy(mesh->params.objPath, relPath, sizeof(mesh->params.objPath) - 1);
+                                mesh->params.objPath[sizeof(mesh->params.objPath) - 1] = '\0';
                             }
                         } catch(...) {}
                     }
@@ -281,19 +323,24 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 newModel = GeometryFactory::createSphere(p.radius, p.stacks, p.slices);
                 break;
             case MeshShapeType::Cylinder:
-                newModel = GeometryFactory::createCylinder(p.radius, p.height, p.slices);
+                newModel = GeometryFactory::createCylinder(p.radius, p.height, p.slices, mesh->useFlatShade);
                 break;
             case MeshShapeType::Cone:
-                newModel = GeometryFactory::createCone(p.radius, p.height, p.slices);
+                newModel = GeometryFactory::createCone(p.radius, p.height, p.slices, mesh->useFlatShade);
                 break;
             case MeshShapeType::Prism:
-                newModel = GeometryFactory::createPrism(p.radius, p.height, p.sides);
+                newModel = GeometryFactory::createPrism(p.radius, p.height, p.sides, mesh->useFlatShade);
                 break;
             case MeshShapeType::Frustum:
-                newModel = GeometryFactory::createPyramidFrustum(p.topRadius, p.bottomRadius, p.height, p.sides);
+                newModel = GeometryFactory::createPyramidFrustum(p.topRadius, p.bottomRadius, p.height, p.sides, mesh->useFlatShade);
                 break;
             case MeshShapeType::Plane:
                 newModel = GeometryFactory::createPlane(p.width, p.depth);
+                break;
+            case MeshShapeType::CustomOBJ:
+                if (strlen(p.objPath) > 0) {
+                    newModel = ResourceManager::Get().getModel(p.objPath, mesh->useFlatShade);
+                }
                 break;
             default:
                 break;

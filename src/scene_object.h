@@ -5,6 +5,7 @@
 #include <string>
 #include <algorithm>
 #include <iostream>
+#include <atomic>
 
 #include "base/transform.h"
 #include "model.h"
@@ -60,6 +61,18 @@ enum class ComponentType
 };
 
 // ==========================================
+// 0. 辅助：ID 生成器
+// ==========================================
+class IDGenerator {
+public:
+    static int generate() {
+        // 静态原子变量，保证每次调用都会增加，且全局唯一
+        static std::atomic<int> counter{ 1 }; 
+        return counter.fetch_add(1);
+    }
+};
+
+// ==========================================
 // 1. 组件基类
 // ==========================================
 class Component
@@ -68,10 +81,17 @@ public:
     GameObject *owner = nullptr;
     bool enabled = true;
 
+    Component() : _instanceId(IDGenerator::generate()) {}
+
     virtual ~Component() = default;
+
+    int getInstanceID() const { return _instanceId; }
 
     // 纯虚函数：获取类型
     virtual ComponentType getType() const = 0;
+
+protected:
+    int _instanceId;
 };
 
 // ==========================================
@@ -88,6 +108,9 @@ public:
     
     // 是否双面渲染 (默认 false，Plane 需要设为 true)
     bool doubleSided = false;
+
+    // 是否使用硬棱角
+    bool useFlatShade = false;
 
     MeshShapeType shapeType = MeshShapeType::Cube;
     MeshParams params;
@@ -144,7 +167,9 @@ public:
     Transform transform;
     std::vector<std::unique_ptr<Component>> components;
 
-    GameObject(const std::string &n) : name(n) {}
+    GameObject(const std::string &n) : name(n), _instanceId(IDGenerator::generate()) {}
+
+    int getInstanceID() const { return _instanceId; }
 
     template <typename T, typename... Args>
     T *addComponent(Args &&...args)
@@ -177,4 +202,7 @@ public:
                            { return p.get() == comp; }),
             components.end());
     }
+
+private:
+    int _instanceId;
 };

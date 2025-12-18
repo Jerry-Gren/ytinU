@@ -45,7 +45,7 @@ void Scene::createDefaultScene()
     // 尝试加载 Gizmo 图标
     try {
         std::string arrowPath = "media/obj/arrow.obj";
-        auto arrowModel = ResourceManager::Get().getModel(arrowPath);
+        auto arrowModel = ResourceManager::Get().getModel(arrowPath, false);
         if (arrowModel) {
             auto arrowMesh = sun->addComponent<MeshComponent>(arrowModel, true);
             arrowMesh->shapeType = MeshShapeType::CustomOBJ;

@@ -499,7 +499,7 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
     _mainShader->setUniformMat4("view", view);
     _mainShader->setUniformVec3("viewPos", viewPos);
 
-    _mainShader->setUniformBool("isDebug", true);
+    _mainShader->setUniformBool("isDebug", false);
 
     glFrontFace(GL_CCW);
 

@@ -38,12 +38,12 @@ void HierarchyPanel::onImGuiRender(const std::unique_ptr<Scene>& scene, GameObje
         auto &go = objects[i];
         
         // 使用 Selectable 模拟列表项
-        // 未来如果要支持拖拽层级，这里需要改用 ImGui::TreeNode
-        std::string label = go->name + "##" + std::to_string(i);
-        if (ImGui::Selectable(label.c_str(), selectedObject == go.get()))
+        ImGui::PushID(go->getInstanceID());
+        if (ImGui::Selectable(go->name.c_str(), selectedObject == go.get()))
         {
             selectedObject = go.get();
         }
+        ImGui::PopID();
     }
 
     // 3. 点击空白处取消选择

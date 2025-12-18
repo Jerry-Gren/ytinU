@@ -46,6 +46,12 @@ public:
 
     void markForDestruction(GameObject* go);
 
+    bool isMarkedForDestruction(GameObject* go) const {
+        if (!go) return false;
+        // 检查指针是否存在于 _killQueue 中
+        return std::find(_killQueue.begin(), _killQueue.end(), go) != _killQueue.end();
+    }
+
     void destroyMarkedObjects();
 
 private:

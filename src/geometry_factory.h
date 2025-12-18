@@ -26,17 +26,17 @@ public:
     // - topRadius == 0                         -> 圆锥
     // - topRadius != bottomRadius              -> 圆台
     // - slices == 3, 4, 5, 6...                -> 三棱柱/台, 四棱柱/台...
-    static std::shared_ptr<Model> createFrustum(float topRadius, float bottomRadius, float height, int slices);
+    static std::shared_ptr<Model> createFrustum(float topRadius, float bottomRadius, float height, int slices, bool useFlatShade);
 
     // 4. 圆柱体 (Cylinder) - 实际上是调用 createFrustum
-    static std::shared_ptr<Model> createCylinder(float radius = 0.5f, float height = 1.0f, int slices = 32);
+    static std::shared_ptr<Model> createCylinder(float radius = 0.5f, float height = 1.0f, int slices = 32, bool useFlatShade = false);
 
     // 5. 圆锥体 (Cone) - 实际上是调用 createFrustum
-    static std::shared_ptr<Model> createCone(float radius = 0.5f, float height = 1.0f, int slices = 32);
+    static std::shared_ptr<Model> createCone(float radius = 0.5f, float height = 1.0f, int slices = 32, bool useFlatShade = false);
 
     // 6. 多面棱柱 (Prism) - 比如六棱柱: radius=1, slices=6
-    static std::shared_ptr<Model> createPrism(float radius = 0.5f, float height = 1.0f, int sides = 6);
+    static std::shared_ptr<Model> createPrism(float radius = 0.5f, float height = 1.0f, int sides = 6, bool useFlatShade = false);
 
     // 7. 多面棱台 (Prism Frustum) - 比如四棱台: topR=0.5, bottomR=1, slices=4
-    static std::shared_ptr<Model> createPyramidFrustum(float topRadius, float bottomRadius, float height, int sides = 4);
+    static std::shared_ptr<Model> createPyramidFrustum(float topRadius, float bottomRadius, float height, int sides = 4, bool useFlatShade = false);
 };
