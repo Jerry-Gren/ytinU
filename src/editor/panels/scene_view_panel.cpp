@@ -212,13 +212,36 @@ void SceneViewPanel::handleMousePick(Scene* scene, GameObject*& selectedObject)
             Ray localRay(localOrigin, localDir);
 
             // 3. 检测
-            float t = 0.0f;
-            if (PhysicsUtils::intersectRayAABB(localRay, meshComp->model->getBoundingBox(), t))
+            float tBox = 0.0f;
+            if (PhysicsUtils::intersectRayAABB(localRay, meshComp->model->getBoundingBox(), tBox))
             {
-                if (t > 0.0f && t < closestDist)
+                // 如果只击中盒子，还不算选中，必须击中三角形
+                // 只有当 AABB 击中时，才进行昂贵的 Mesh 检测
+                
+                // ==================================================
+                // Phase 2: 精测 (Narrow Phase) - Mesh
+                // ==================================================
+                float tMesh = 0.0f;
+                const auto& verts = meshComp->model->getVertices();
+                const auto& indices = meshComp->model->getIndices();
+
+                if (PhysicsUtils::intersectRayMesh(localRay, verts, indices, tMesh))
                 {
-                    closestDist = t;
-                    closestObj = go.get();
+                    // [关键] tMesh 是局部空间的距离。
+                    // 为了在不同缩放的物体之间正确排序，我们需要把它转换回世界空间距离。
+                    // WorldPos = WorldOrigin + WorldDir * tWorld
+                    // LocalPos = LocalOrigin + LocalDir * tMesh
+                    // 简单的近似：把 LocalHitPos 转回 WorldPos，然后算距离。
+                    
+                    glm::vec3 localHitPos = localRay.origin + localRay.direction * tMesh;
+                    glm::vec3 worldHitPos = glm::vec3(modelMatrix * glm::vec4(localHitPos, 1.0f));
+                    float worldDist = glm::distance(worldRay.origin, worldHitPos);
+
+                    if (worldDist < closestDist)
+                    {
+                        closestDist = worldDist;
+                        closestObj = go.get();
+                    }
                 }
             }
         }
