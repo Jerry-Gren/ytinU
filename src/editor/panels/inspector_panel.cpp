@@ -38,7 +38,7 @@ void InspectorPanel::onImGuiRender(GameObject*& selectedObject, Scene* sceneCont
 
         if (shouldDeleteObj && sceneContext)
         {
-            sceneContext->removeGameObject(selectedObject);
+            sceneContext->markForDestruction(selectedObject);
             selectedObject = nullptr;
             // 立即结束当前 Frame 的绘制，防止访问野指针
             ImGui::End(); 

@@ -56,3 +56,28 @@ void Scene::createDefaultScene()
 
     _gameObjects.push_back(std::unique_ptr<GameObject>(sun));
 }
+
+void Scene::markForDestruction(GameObject* go)
+{
+    // 检查是否已经在队列中，防止重复添加
+    if (std::find(_killQueue.begin(), _killQueue.end(), go) == _killQueue.end()) {
+        _killQueue.push_back(go);
+    }
+}
+
+void Scene::destroyMarkedObjects()
+{
+    if (_killQueue.empty()) return;
+
+    for (GameObject* go : _killQueue)
+    {
+        // 执行真正的物理删除
+        _gameObjects.erase(
+            std::remove_if(_gameObjects.begin(), _gameObjects.end(),
+                [go](const std::unique_ptr<GameObject>& p) { 
+                    return p.get() == go; 
+                }),
+            _gameObjects.end());
+    }
+    _killQueue.clear();
+}

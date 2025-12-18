@@ -200,6 +200,10 @@ void SceneRoaming::renderFrame()
     // 5. 提交 ImGui 绘制数据
     // =========================================================
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    if (_scene) {
+        _scene->destroyMarkedObjects();
+    }
 }
 
 void SceneRoaming::renderUI()

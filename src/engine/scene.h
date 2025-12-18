@@ -44,6 +44,12 @@ public:
     // 创建默认场景 (比如初始化一个太阳)
     void createDefaultScene();
 
+    void markForDestruction(GameObject* go);
+
+    void destroyMarkedObjects();
+
 private:
     std::vector<std::unique_ptr<GameObject>> _gameObjects;
+
+    std::vector<GameObject*> _killQueue;
 };
