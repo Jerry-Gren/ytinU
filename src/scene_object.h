@@ -100,6 +100,8 @@ protected:
 class MeshComponent : public Component
 {
 public:
+    static constexpr ComponentType Type = ComponentType::MeshRenderer;
+
     std::shared_ptr<Model> model;
     Material material;
 
@@ -118,7 +120,7 @@ public:
     MeshComponent(std::shared_ptr<Model> m, bool gizmo = false)
         : model(m), isGizmo(gizmo) {}
 
-    ComponentType getType() const override { return ComponentType::MeshRenderer; }
+    ComponentType getType() const override { return Type; }
 
     void setMesh(std::shared_ptr<Model> newModel)
     {
@@ -139,6 +141,8 @@ enum class LightType
 class LightComponent : public Component
 {
 public:
+    static constexpr ComponentType Type = ComponentType::Light;
+
     LightType type;
     glm::vec3 color = glm::vec3(1.0f);
     float intensity = 1.0f;
@@ -154,7 +158,7 @@ public:
 
     LightComponent(LightType t) : type(t) {}
 
-    ComponentType getType() const override { return ComponentType::Light; }
+    ComponentType getType() const override { return Type; }
 };
 
 // ==========================================
@@ -186,8 +190,9 @@ public:
     {
         for (auto &comp : components)
         {
-            if (dynamic_cast<T *>(comp.get()))
+            if (comp->getType() == T::Type)
             {
+                // 安全的向下转型 (因为我们已经确认了类型)
                 return static_cast<T *>(comp.get());
             }
         }
