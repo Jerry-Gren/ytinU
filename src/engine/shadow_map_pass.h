@@ -10,39 +10,50 @@
 #include "scene.h"
 #include "base/camera.h"
 
+struct ShadowCasterInfo {
+    glm::vec3 direction;
+    float shadowNormalBias;
+    unsigned int cullFaceMode;
+};
+
 class ShadowMapPass
 {
 public:
-    // 分辨率越高，锯齿越少。4096 是现代 PC 的标准配置。
-    ShadowMapPass(int resolution = 4096); 
+    // resolution: 单张贴图分辨率
+    // maxLights: 最大支持的平行光数量
+    ShadowMapPass(int resolution = 4096, int maxLights = 4);
     ~ShadowMapPass();
 
-    // 核心渲染函数：从灯光视角渲染场景
-    void render(const Scene& scene, const glm::vec3& lightDir, Camera* camera, float shadowNormalBias, unsigned int cullFaceMode);
+    // 核心渲染函数：接收光源列表
+    void render(const Scene& scene, const std::vector<ShadowCasterInfo>& casters, Camera* camera);
 
-    // 获取数据供主 Shader 使用
-    GLuint getDepthMapArray() const { return _depthMap; } // 现在这是一个 Texture Array
+    GLuint getDepthMapArray() const { return _depthMap; }
+
+    // 返回所有光源的所有级联矩阵 (展平的一维数组)
+    // 布局: [Light0_Casc0, Light0_Casc1..., Light1_Casc0...]
     const std::vector<glm::mat4>& getLightSpaceMatrices() const { return _lightSpaceMatrices; }
+
     const std::vector<float>& getCascadeLevels() const { return _cascadeLevels; }
-    int getCascadeCount() const { return _lightSpaceMatrices.size(); }
+    int getCascadeCount() const { return (int)_cascadeLevels.size() + 1; } // +1 因为最后一层是 zFar
 
 private:
     int _resolution;
+    int _maxLights;
+    int _layerCountPerLight; // cascadeLevels.size() + 1
+
     GLuint _fbo = 0;
     GLuint _depthMap = 0;
     
-    // CSM 数据
+    // 存储所有光源的矩阵
     std::vector<glm::mat4> _lightSpaceMatrices;
-    std::vector<float> _cascadeLevels; // 存储每一层的分割距离 (远平面)
+    std::vector<float> _cascadeLevels; 
     
     std::unique_ptr<GLSLProgram> _depthShader;
 
     void initFBO();
     void initShader();
 
-    // 内部数学辅助：获取视锥体切片的 8 个角点
     std::vector<glm::vec4> getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view);
     
-    // 内部数学辅助：计算单个级联的光照矩阵
     glm::mat4 getLightSpaceMatrix(const float nearPlane, const float farPlane, const glm::vec3& lightDir, Camera* camera);
 };

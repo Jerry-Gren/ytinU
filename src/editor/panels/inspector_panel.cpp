@@ -501,37 +501,64 @@ void InspectorPanel::drawComponentUI(Component *comp)
         ImGui::ColorEdit3("Color", glm::value_ptr(light->color));
         ImGui::DragFloat("Intensity", &light->intensity, 0.1f, 0.0f, 10.0f);
 
+        // 平行光和点光源现在都支持阴影，聚光灯暂时不支持（可以置灰）
+        bool supportsShadows = (light->type == LightType::Directional || light->type == LightType::Point);
+        if (!supportsShadows) ImGui::BeginDisabled();
+        ImGui::Checkbox("Cast Shadows", &light->castShadows);
+        if (!supportsShadows) ImGui::EndDisabled();
+
+        ImGui::Separator();
+
         if (light->type == LightType::Directional) {
-            ImGui::Separator();
-            ImGui::Text("Shadow Settings");
+            ImGui::Text("Directional Settings");
             
-            // Depth Bias
-            ImGui::DragFloat("Depth Bias", &light->shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pushes the shadow away, which fixes z-fighting.");
+            // 2. 只有开启阴影时才显示详细参数
+            if (light->castShadows)
+            {
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Hardware Limit: Only the first 4 active shadow-casting lights will render shadows.");
+                }
+                
+                ImGui::Indent(); // 缩进一下，表示层级关系
+                ImGui::Text("Shadow Settings");
+                
+                // Depth Bias
+                ImGui::DragFloat("Depth Bias", &light->shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pushes the shadow away, which fixes z-fighting.");
 
-            // Normal Bias
-            ImGui::DragFloat("Normal Bias", &light->shadowNormalBias, 0.001f, 0.0f, 1.0f, "%.3f");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shrinks the shadow caster along normals, which fixes acne.");
+                // Normal Bias
+                ImGui::DragFloat("Normal Bias", &light->shadowNormalBias, 0.001f, 0.0f, 1.0f, "%.3f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shrinks the shadow caster along normals, which fixes acne.");
 
-            // [新增] 剔除模式选择
-            const char* cullModeNames[] = { "Cull Back", "Cull Front" };
-            // 简单的逻辑映射：0 -> GL_BACK, 1 -> GL_FRONT
-            int currentCull = (light->shadowCullFace == GL_FRONT) ? 1 : 0;
+                // 剔除模式
+                const char* cullModeNames[] = { "Cull Back", "Cull Front" };
+                int currentCull = (light->shadowCullFace == GL_FRONT) ? 1 : 0;
 
-            if (ImGui::Combo("Shadow Culling", &currentCull, cullModeNames, 2)) {
-                light->shadowCullFace = (currentCull == 1) ? GL_FRONT : GL_BACK;
-            }
-            
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Front: Best for solid objects (no acne).\nBack: Best for thin objects (no leaking).");
+                if (ImGui::Combo("Cull Face", &currentCull, cullModeNames, 2)) {
+                    light->shadowCullFace = (currentCull == 1) ? GL_FRONT : GL_BACK;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Front: Best for solid objects (no acne).\nBack: Best for thin objects (no leaking).");
+                }
+                
+                ImGui::Unindent();
             }
         }
 
         if (light->type == LightType::Point || light->type == LightType::Spot)
         {
-            ImGui::Text("Attenuation");
+            ImGui::Text("Point Settings");
             ImGui::DragFloat("Linear", &light->linear, 0.001f);
             ImGui::DragFloat("Quadratic", &light->quadratic, 0.001f);
+
+            if (light->castShadows) {
+                ImGui::Indent();
+                ImGui::Text("Shadow Config");
+                // 点光源通常不需要 Normal Bias，只需要一个基础 Bias
+                // 这里复用 shadowBias 变量
+                ImGui::DragFloat("Bias", &light->shadowBias, 0.001f, 0.0f, 0.5f, "%.3f");
+                ImGui::Unindent();
+            }
         }
 
         if (light->type == LightType::Spot)

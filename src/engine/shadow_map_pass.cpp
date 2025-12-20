@@ -1,18 +1,18 @@
 #include "shadow_map_pass.h"
 #include <iostream>
 
-ShadowMapPass::ShadowMapPass(int resolution) 
-    : _resolution(resolution)
+ShadowMapPass::ShadowMapPass(int resolution, int maxLights) 
+    : _resolution(resolution), _maxLights(maxLights)
 {
     // 定义级联层级 (分割距离)
-    // 这里我们定义 4 层级联。单位是米。
-    // 能够覆盖近处细节 (0-10m) 到中远距离。
-    // 注意：最后一层不需要存，它就是相机的 zFar。
+    // 实际层级数 = _cascadeLevels.size() + 1
+    // 例如: [10, 50, 200, 800, 2000] -> 5个分割点 -> 6层级联
     _cascadeLevels = { 10.0f, 50.0f, 200.0f, 800.0f, 2000.0f };
-    // 实际层级是: [0, 10], [10, 50], [50, 200], [200, 800], [800, 2000], [2000, zFar] -> 共 6 层
+    
+    _layerCountPerLight = (int)_cascadeLevels.size() + 1;
 
-    // 预分配矩阵空间
-    _lightSpaceMatrices.resize(_cascadeLevels.size() + 1);
+    // 预分配矩阵空间: 灯光数 * 每灯层数
+    _lightSpaceMatrices.resize(_maxLights * _layerCountPerLight);
 
     initShader();
     initFBO();
@@ -32,10 +32,12 @@ void ShadowMapPass::initFBO()
     glBindTexture(GL_TEXTURE_2D_ARRAY, _depthMap); // 绑定为数组纹理
 
     // 分配 3D 内存
-    // width, height, depth (层数)。我们有 4 层。
+    // 总层数 = 最大灯光数 * 每个灯光的级联数
+    int totalLayers = _maxLights * _layerCountPerLight;
+
     glTexImage3D(
         GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT32F, 
-        _resolution, _resolution, int(_cascadeLevels.size() + 1), 
+        _resolution, _resolution, totalLayers, 
         0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL
     );
     
@@ -72,11 +74,11 @@ void ShadowMapPass::initShader()
     const char* vsCode = R"(
         #version 330 core
         layout (location = 0) in vec3 aPos;
-        layout (location = 1) in vec3 aNormal; // [新增] 我们需要法线
+        layout (location = 1) in vec3 aNormal;
 
         uniform mat4 lightSpaceMatrix;
         uniform mat4 model;
-        uniform float normalBias; // [新增]
+        uniform float normalBias;
 
         void main() {
             // 1. 计算世界空间位置
@@ -109,15 +111,19 @@ void ShadowMapPass::initShader()
     _depthShader->link();
 }
 
-void ShadowMapPass::render(const Scene& scene, const glm::vec3& lightDir, Camera* camera, float shadowNormalBias, unsigned int cullFaceMode)
+void ShadowMapPass::render(const Scene& scene, const std::vector<ShadowCasterInfo>& casters, Camera* camera)
 {
-    // 1. 计算每一层的矩阵
-    _lightSpaceMatrices.clear();
+    // 1. 重置矩阵列表
+    // 注意：我们不 clear() 而是 resize，或者直接覆盖，保持大小一致
+    // 如果实际灯光数少于 maxLights，后面的矩阵可以是单位矩阵或无效值
+    int requiredSize = _maxLights * _layerCountPerLight;
+    if (_lightSpaceMatrices.size() != requiredSize) {
+        _lightSpaceMatrices.resize(requiredSize);
+    }
     
-    // 这里的 near/far 必须和相机的设置一致
+    // 获取相机参数
     float camNear = 0.1f;
     float camFar = 1000.0f;
-
     if (auto pCam = dynamic_cast<PerspectiveCamera*>(camera)) {
         camNear = pCam->znear;
         camFar = pCam->zfar;
@@ -126,63 +132,69 @@ void ShadowMapPass::render(const Scene& scene, const glm::vec3& lightDir, Camera
         camFar = oCam->zfar;
     }
 
-    // 循环处理每一层
-    // 层级示例: 
-    // 0: [near, 10]
-    // 1: [10, 60]
-    // 2: [60, 250]
-    // 3: [250, far]
-    for (size_t i = 0; i < _cascadeLevels.size() + 1; ++i)
-    {
-        float prevSplit = (i == 0) ? camNear : _cascadeLevels[i - 1];
-        float currSplit = (i < _cascadeLevels.size()) ? _cascadeLevels[i] : camFar;
-
-        _lightSpaceMatrices.push_back(getLightSpaceMatrix(prevSplit, currSplit, lightDir, camera));
-    }
-
-    // 2. 渲染流程
+    // 2. 准备渲染
     glBindFramebuffer(GL_FRAMEBUFFER, _fbo);
     glViewport(0, 0, _resolution, _resolution);
-    
-    // 这里需要把每一层都清空，或者每次绘制前清空
-    glClear(GL_DEPTH_BUFFER_BIT); 
-    // 注意：TextureArray 的 clear 比较特殊，如果不放心，可以在下面循环里 clear，但那样效率略低。
-    // 正确的做法是 glClear 会清除当前绑定的 Attachment。如果当前绑定的是 Layer 0，它只清 Layer 0 吗？
-    // OpenGL 规范比较绕。为了安全起见，我们在循环里做 glClear。
-
     _depthShader->use();
-    // 传递 Normal Bias (如果需要)
-    _depthShader->setUniformFloat("normalBias", shadowNormalBias);
 
-    // 开启剔除 (GL_BACK) 
-    glEnable(GL_CULL_FACE);
-    glCullFace(cullFaceMode);
+    // 为了安全，先清除所有层（或者只清除用到的层）
+    // 为了性能，我们可以在下面的循环中 glClear，但需要注意 GL 状态
+    // 这里最简单的方式是清除整个 FBO，但 FBO 绑定的是 Layer，所以无法一次性清除 Array
+    // 必须在循环里 Clear
 
-    for (size_t i = 0; i < _lightSpaceMatrices.size(); ++i)
+    int lightCount = std::min((int)casters.size(), _maxLights);
+
+    // --- 双重循环：遍历所有光源 ---
+    for (int lightIdx = 0; lightIdx < lightCount; ++lightIdx)
     {
-        // [关键] 绑定当前层
-        glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, _depthMap, 0, i);
-        
-        // 清除这一层的深度
-        glClear(GL_DEPTH_BUFFER_BIT);
+        const auto& caster = casters[lightIdx];
 
-        // 设置当前层的矩阵
-        _depthShader->setUniformMat4("lightSpaceMatrix", _lightSpaceMatrices[i]);
+        // 设置当前光源的参数
+        _depthShader->setUniformFloat("normalBias", caster.shadowNormalBias);
+        glEnable(GL_CULL_FACE);
+        glCullFace(caster.cullFaceMode);
 
-        // 绘制场景
-        for (const auto& go : scene.getGameObjects()) {
-            auto meshComp = go->getComponent<MeshComponent>();
-            if (!meshComp || !meshComp->enabled) continue;
-            if (meshComp->isGizmo) continue;
+        // --- 遍历级联 ---
+        for (int cascadeIdx = 0; cascadeIdx < _layerCountPerLight; ++cascadeIdx)
+        {
+            float prevSplit = (cascadeIdx == 0) ? camNear : _cascadeLevels[cascadeIdx - 1];
+            float currSplit = (cascadeIdx < _cascadeLevels.size()) ? _cascadeLevels[cascadeIdx] : camFar;
 
-            glm::mat4 model = go->transform.getLocalMatrix();
-            model = model * meshComp->model->transform.getLocalMatrix();
-            _depthShader->setUniformMat4("model", model);
+            // 1. 计算矩阵
+            glm::mat4 matrix = getLightSpaceMatrix(prevSplit, currSplit, caster.direction, camera);
+            
+            // 2. 存储矩阵到扁平数组
+            // 索引 = 光源Index * 每光层数 + 当前层
+            int globalLayerIdx = lightIdx * _layerCountPerLight + cascadeIdx;
+            _lightSpaceMatrices[globalLayerIdx] = matrix;
 
-            meshComp->model->draw();
+            // 3. 绑定 FBO 到对应的 Texture Layer
+            glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, _depthMap, 0, globalLayerIdx);
+            
+            // 4. 清除当前层的深度缓冲
+            glClear(GL_DEPTH_BUFFER_BIT);
+
+            // 5. 提交矩阵并绘制
+            _depthShader->setUniformMat4("lightSpaceMatrix", matrix);
+
+            // 绘制场景
+            for (const auto& go : scene.getGameObjects()) {
+                auto meshComp = go->getComponent<MeshComponent>();
+                if (!meshComp || !meshComp->enabled) continue;
+                if (meshComp->isGizmo) continue;
+
+                glm::mat4 model = go->transform.getLocalMatrix();
+                // 叠加 model 自身的 local matrix (如果有)
+                if (meshComp->model) {
+                     model = model * meshComp->model->transform.getLocalMatrix();
+                     _depthShader->setUniformMat4("model", model);
+                     meshComp->model->draw();
+                }
+            }
         }
     }
 
+    // 恢复状态
     glCullFace(GL_BACK);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }

@@ -2053,6 +2053,19 @@ void InspectorPanel::drawComponentUI(Component *comp)
             // Normal Bias
             ImGui::DragFloat("Normal Bias", &light->shadowNormalBias, 0.001f, 0.0f, 1.0f, "%.3f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shrinks the shadow caster along normals, which fixes acne.");
+
+            // [新增] 剔除模式选择
+            const char* cullModeNames[] = { "Cull Back", "Cull Front" };
+            // 简单的逻辑映射：0 -> GL_BACK, 1 -> GL_FRONT
+            int currentCull = (light->shadowCullFace == GL_FRONT) ? 1 : 0;
+
+            if (ImGui::Combo("Shadow Culling", &currentCull, cullModeNames, 2)) {
+                light->shadowCullFace = (currentCull == 1) ? GL_FRONT : GL_BACK;
+            }
+            
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Front: Best for solid objects (no acne).\nBack: Best for thin objects (no leaking).");
+            }
         }
 
         if (light->type == LightType::Point || light->type == LightType::Spot)
@@ -4883,22 +4896,25 @@ void Renderer::init() {
 
                 // 计算 Bias
                 vec3 N = normalize(normal);
-            vec3 L = normalize(lightDir);
-            float cosTheta = clamp(dot(N, L), 0.0, 1.0);
-            
-            // 基础 Bias
-            float baseBias = shadowBias * (1.0 - cosTheta);
-            baseBias = max(baseBias, shadowBias * 0.1);
+                vec3 L = normalize(lightDir);
+                float cosTheta = clamp(dot(N, L), 0.0, 1.0);
+                
+                // 基础 Bias
+                float baseBias = shadowBias * (1.0 - cosTheta);
+                baseBias = max(baseBias, shadowBias * 0.1);
 
-            // [修改] 不要随 Layer 放大，或者只做极其微小的放大
-            // 如果使用了 GL_FRONT 剔除，这里的 Bias 甚至可以接近于 0
-            float finalBias = baseBias;
-                float currentDepth = pCoords.z - finalBias;
+                if (currentLayer == 1) baseBias *= 0.5;
+                else if (currentLayer == 2) baseBias *= 0.25;
+                else if (currentLayer == 3) baseBias *= 0.125;
+
+                float currentDepth = pCoords.z - baseBias;
                 
                 // 设置 PCF 半径
                 float filterRadius = 1.0;
                 if (currentLayer == 0) filterRadius = 4.0;
                 else if (currentLayer == 1) filterRadius = 2.0;
+                else if (currentLayer == 2) filterRadius = 1.0;
+                else filterRadius = 0.5;
 
                 vec2 texSize = 1.0 / textureSize(shadowMap, 0).xy;
                 
@@ -5148,9 +5164,11 @@ void Renderer::render(const Scene& scene, Camera* camera,
     
     float nBias = mainLight ? mainLight->shadowNormalBias : 0.0f; // 获取 Normal Bias
 
+    unsigned int cullMode = mainLight ? mainLight->shadowCullFace : GL_BACK;
+
     // CSM 不需要 shadowProjectionSize (因为它会自动计算视锥切片大小)，或者你可以保留它用于非透视相机
     // 这里我们依然调用 render，shadowPass 内部会处理多级渲染
-    _shadowPass->render(scene, lightDir, camera, nBias);
+    _shadowPass->render(scene, lightDir, camera, nBias, cullMode);
 
     // 1. 绑定目标 FBO
     glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
@@ -6337,6 +6355,11 @@ public:
     float cutOff = glm::cos(glm::radians(12.5f));
     float outerCutOff = glm::cos(glm::radians(17.5f));
 
+    // 阴影投射时的剔除面
+    // GL_BACK (0x0405): 剔除背面 (默认，适合闭合物体，解决漏光)
+    // GL_FRONT (0x0404): 剔除正面 (适合解决 Shadow Acne，Unity/UE常用技巧)
+    unsigned int shadowCullFace = GL_BACK;
+
     // Unity 风格的阴影参数
     // Depth Bias: 对应 Unity 的 "Bias"，通常很小 (0.001 ~ 0.05)
     float shadowBias = 0.0010f; 
@@ -6531,7 +6554,7 @@ void ShadowMapPass::initShader()
     _depthShader->link();
 }
 
-void ShadowMapPass::render(const Scene& scene, const glm::vec3& lightDir, Camera* camera, float shadowNormalBias)
+void ShadowMapPass::render(const Scene& scene, const glm::vec3& lightDir, Camera* camera, float shadowNormalBias, unsigned int cullFaceMode)
 {
     // 1. 计算每一层的矩阵
     _lightSpaceMatrices.clear();
@@ -6578,7 +6601,7 @@ void ShadowMapPass::render(const Scene& scene, const glm::vec3& lightDir, Camera
 
     // 开启剔除 (GL_BACK) 
     glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);
+    glCullFace(cullFaceMode);
 
     for (size_t i = 0; i < _lightSpaceMatrices.size(); ++i)
     {
@@ -6605,6 +6628,7 @@ void ShadowMapPass::render(const Scene& scene, const glm::vec3& lightDir, Camera
         }
     }
 
+    glCullFace(GL_BACK);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -6744,7 +6768,7 @@ public:
     ~ShadowMapPass();
 
     // 核心渲染函数：从灯光视角渲染场景
-    void render(const Scene& scene, const glm::vec3& lightDir, Camera* camera, float shadowNormalBias);
+    void render(const Scene& scene, const glm::vec3& lightDir, Camera* camera, float shadowNormalBias, unsigned int cullFaceMode);
 
     // 获取数据供主 Shader 使用
     GLuint getDepthMapArray() const { return _depthMap; } // 现在这是一个 Texture Array

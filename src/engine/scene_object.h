@@ -148,6 +148,10 @@ public:
     glm::vec3 color = glm::vec3(1.0f);
     float intensity = 1.0f;
 
+    // 阴影开关
+    // 默认为 true，方便起见，但通常只有 Directional 会用到
+    bool castShadows = true;
+
     // 衰减
     float constant = 1.0f;
     float linear = 0.09f;
