@@ -524,7 +524,7 @@ void InspectorPanel::drawComponentUI(Component *comp)
             
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Front: Best for solid objects (no acne).\nBack: Best for thin objects (no leaking).");
-        }
+            }
         }
 
         if (light->type == LightType::Point || light->type == LightType::Spot)
