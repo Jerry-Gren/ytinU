@@ -45,9 +45,12 @@ void ResourceManager::scanDirectory(const std::string& rootDir)
         if (entry.is_regular_file())
         {
             std::string ext = entry.path().extension().string();
-            std::transform(ext.begin(), ext.end(), ext.begin(), 
-                           [](unsigned char c){ return std::tolower(c); });
-            if (ext == ".obj")
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            
+            bool isModel = (ext == ".obj");
+            bool isTexture = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga");
+
+            if (isModel || isTexture)
             {
                 std::string filename = entry.path().filename().string();
                 
@@ -105,6 +108,38 @@ std::shared_ptr<Model> ResourceManager::getModel(const std::string& pathKey, boo
     }
     catch (std::exception& e) {
         std::cerr << "[ResourceManager] Failed to load model: " << e.what() << std::endl;
+        return nullptr;
+    }
+}
+
+std::shared_ptr<ImageTexture2D> ResourceManager::getTexture(const std::string& pathKey)
+{
+    std::string cleanPath = pathKey;
+    std::replace(cleanPath.begin(), cleanPath.end(), '\\', '/');
+
+    std::string cacheKey = cleanPath;
+
+    // 1. 查缓存
+    auto it = _textureCache.find(cleanPath);
+    if (it != _textureCache.end()) {
+        return it->second;
+    }
+
+    // 2. 加载
+    std::string fullPath = getFullPath(cleanPath);
+    if (!std::filesystem::exists(fullPath)) {
+        std::cerr << "[ResourceManager] Error: Texture not found: " << fullPath << std::endl;
+        return nullptr;
+    }
+
+    try {
+        // ImageTexture2D 构造函数会抛出异常如果加载失败
+        auto newTex = std::make_shared<ImageTexture2D>(fullPath);
+        _textureCache[cacheKey] = newTex;
+        return newTex;
+    }
+    catch (std::exception& e) {
+        std::cerr << "[ResourceManager] Failed to load texture: " << e.what() << std::endl;
         return nullptr;
     }
 }

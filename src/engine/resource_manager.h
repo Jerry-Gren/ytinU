@@ -6,6 +6,7 @@
 #include <vector>
 #include <filesystem>
 #include "engine/model.h"
+#include "base/texture2d.h"
 
 class ResourceManager
 {
@@ -26,6 +27,9 @@ public:
     // path: 相对路径，例如 "obj/bunny.obj"
     std::shared_ptr<Model> getModel(const std::string& pathKey, bool useFlatShade);
 
+    // 加载或获取已缓存的纹理
+    std::shared_ptr<ImageTexture2D> getTexture(const std::string& pathKey);
+
     // 扫描资源目录下所有的 .obj 文件 (用于 UI 显示)
     // rootDir: 资源根目录，例如 "../../media/"
     void scanDirectory(const std::string& rootDir);
@@ -35,6 +39,7 @@ public:
 
     void shutdown() {
         _modelCache.clear(); // 强制释放所有 Model shared_ptr
+        _textureCache.clear();
     }
 
 private:
@@ -42,8 +47,11 @@ private:
 
     std::string _projectRoot = ""; // 默认为空
 
-    // 缓存：key=相对路径, value=模型指针
+    // 模型缓存：key=相对路径, value=模型指针
     std::unordered_map<std::string, std::shared_ptr<Model>> _modelCache;
+
+    // 纹理缓存
+    std::unordered_map<std::string, std::shared_ptr<ImageTexture2D>> _textureCache;
 
     // 扫描到的文件列表
     std::vector<std::pair<std::string, std::string>> _fileList;

@@ -1,5 +1,6 @@
 #include "project_panel.h"
 #include <imgui.h>
+#include <algorithm>
 
 ProjectPanel::ProjectPanel() : Panel("Project / Assets") {}
 
@@ -28,6 +29,11 @@ void ProjectPanel::onImGuiRender()
         std::string filename = file.first;
         std::string relativePath = file.second;
 
+        std::string ext = std::filesystem::path(filename).extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        bool isModel = (ext == ".obj");
+        bool isTexture = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga");
+
         ImGui::PushID(relativePath.c_str());
 
         // 按钮代表文件
@@ -36,8 +42,15 @@ void ProjectPanel::onImGuiRender()
         // 拖拽源
         if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
         {
-            ImGui::SetDragDropPayload("ASSET_OBJ", relativePath.c_str(), relativePath.size() + 1);
-            ImGui::Text("Model: %s", filename.c_str());
+            if (isModel) {
+                ImGui::SetDragDropPayload("ASSET_OBJ", relativePath.c_str(), relativePath.size() + 1);
+                ImGui::Text("Model: %s", filename.c_str());
+            }
+            else if (isTexture)
+            {
+                ImGui::SetDragDropPayload("ASSET_TEXTURE", relativePath.c_str(), relativePath.size() + 1);
+                ImGui::Text("Texture: %s", filename.c_str());
+            }
             ImGui::EndDragDropSource();
         }
 

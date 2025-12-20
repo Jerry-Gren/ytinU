@@ -15,6 +15,7 @@ Model::Model(const std::string &filepath, bool useFlatShade)
     // 2. 将数据移动到 Model 的成员变量中
     _vertices = std::move(data.vertices);
     _indices = std::move(data.indices);
+    _hasUVs = data.hasUVs;
 
     // 3. 后续初始化流程保持不变
     computeBoundingBox();
@@ -23,6 +24,7 @@ Model::Model(const std::string &filepath, bool useFlatShade)
 Model::Model(const std::vector<Vertex> &vertices, const std::vector<uint32_t> &indices)
     : _vertices(vertices), _indices(indices), _isUploaded(false)
 {
+    _hasUVs = true;
     computeBoundingBox();
 }
 

@@ -84,6 +84,7 @@ void InspectorPanel::drawComponents(GameObject* obj)
         std::string headerName = "Unknown Component";
         if (comp->getType() == ComponentType::MeshRenderer) headerName = "Mesh Renderer";
         else if (comp->getType() == ComponentType::Light) headerName = "Light Source";
+        else if (comp->getType() == ComponentType::ReflectionProbe) headerName = "Reflection Probe";
 
         bool isOpen = ImGui::CollapsingHeader(headerName.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
         if (isOpen)
@@ -123,6 +124,12 @@ void InspectorPanel::drawComponents(GameObject* obj)
                 mesh->isGizmo = true; 
             }
         }
+
+        bool hasProbe = obj->getComponent<ReflectionProbeComponent>() != nullptr;
+        if (ImGui::MenuItem("Reflection Probe", nullptr, false, !hasProbe))
+        {
+            obj->addComponent<ReflectionProbeComponent>();
+        }
         ImGui::EndPopup();
     }
 }
@@ -143,7 +150,8 @@ void InspectorPanel::drawComponentUI(Component *comp)
         ImGui::SameLine();
         ImGui::Checkbox("Double Sided", &mesh->doubleSided);
 
-        bool canFlatShade = (mesh->shapeType == MeshShapeType::Cylinder || 
+        bool canFlatShade = (mesh->shapeType == MeshShapeType::Sphere ||
+                             mesh->shapeType == MeshShapeType::Cylinder || 
                              mesh->shapeType == MeshShapeType::Cone ||
                              mesh->shapeType == MeshShapeType::Prism || 
                              mesh->shapeType == MeshShapeType::Frustum ||
@@ -174,6 +182,7 @@ void InspectorPanel::drawComponentUI(Component *comp)
                     break;
                 case MeshShapeType::Sphere:
                     mesh->doubleSided = false;
+                    mesh->useFlatShade = false;
                     break;
                 case MeshShapeType::Cylinder:
                     mesh->doubleSided = false;
@@ -272,39 +281,41 @@ void InspectorPanel::drawComponentUI(Component *comp)
         case MeshShapeType::CustomOBJ:
             {
                 // 显示当前路径 (只读，或可编辑)
-                ImGui::InputText("Path", mesh->params.objPath, sizeof(mesh->params.objPath), ImGuiInputTextFlags_ReadOnly);
+                std::string fullPath = mesh->params.objPath;
+                std::string fileName = std::filesystem::path(fullPath).filename().string();
 
-                // [核心] 拖拽接收区 (Drop Target)
-                // 我们让整个 InputText 区域都成为接收区
-                if (ImGui::BeginDragDropTarget())
-                {
-                    // 只接受 "ASSET_OBJ" 类型的 Payload
-                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_OBJ"))
-                    {
-                       // 1. 获取 Payload (相对路径)
-                        const char* relPath = (const char*)payload->Data;
-                    
-                        try {
-                            bool initialFlatState = false;
-                            auto newModel = ResourceManager::Get().getModel(relPath, initialFlatState); // getModel 内部处理拼接
+                drawResourceSlot("Mesh File", fileName, fullPath, "ASSET_OBJ",
+                    // OnDrop
+                    [&](const std::string& path) {
+                        bool initialFlatState = false;
+                        // 使用 path 加载
+                        auto newModel = ResourceManager::Get().getModel(path, initialFlatState);
+                        if (newModel) {
+                            mesh->setMesh(newModel);
+                            mesh->isGizmo = false;
+                            mesh->doubleSided = false;
+                            mesh->useFlatShade = initialFlatState;
 
-                            if (newModel) {
-                                mesh->setMesh(newModel);
-                                // 导入模型一般预期都是清空之前的状态
-                                mesh->isGizmo = false;
-                                mesh->doubleSided = false;
-                                mesh->useFlatShade = initialFlatState;
-                                // 2. 更新 UI 文字 (显示相对路径，比较短，好看)
-                                strncpy(mesh->params.objPath, relPath, sizeof(mesh->params.objPath) - 1);
-                                mesh->params.objPath[sizeof(mesh->params.objPath) - 1] = '\0';
+                            if (!newModel->hasUVs()) {
+                                // 如果模型没有 UV，自动开启 Triplanar，并给一个合理的缩放
+                                mesh->useTriplanar = true;
+                                mesh->triplanarScale = 0.2f; // 0.2 通常适合房间大小的物体，1.0 适合小物体，可自行调整默认值
+                            } else {
+                                // 如果有 UV，默认使用原始 UV
+                                mesh->useTriplanar = false;
+                                mesh->triplanarScale = 1.0f;
                             }
-                        } catch(...) {}
-                    }
-                    ImGui::EndDragDropTarget();
-                }
+                            
+                            strncpy(mesh->params.objPath, path.c_str(), sizeof(mesh->params.objPath) - 1);
+                            mesh->params.objPath[sizeof(mesh->params.objPath) - 1] = '\0';
+                        }
+                    },
+                    // OnClear
+                    nullptr
+                );
                 
-                // 提示信息
-                ImGui::TextDisabled("(Drag an OBJ file here from Project panel)");
+                // 提示信息可以移到 Tooltip 或者保留在下方
+                // ImGui::TextDisabled("(?)"); 
                 break;
             }
         }
@@ -321,7 +332,7 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 newModel = GeometryFactory::createCube(p.size);
                 break;
             case MeshShapeType::Sphere:
-                newModel = GeometryFactory::createSphere(p.radius, p.stacks, p.slices);
+                newModel = GeometryFactory::createSphere(p.radius, p.stacks, p.slices, mesh->useFlatShade);
                 break;
             case MeshShapeType::Cylinder:
                 newModel = GeometryFactory::createCylinder(p.radius, p.height, p.slices, mesh->useFlatShade);
@@ -391,8 +402,84 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 ImGui::ColorEdit3("Specular", glm::value_ptr(mesh->material.specular));
             }
 
+            // 2. [新增] 纹理贴图设置 (Texture Map)
+            ImGui::Spacing();
+            ImGui::Separator();
+        
+            std::string fullPath = mesh->diffuseMap ? mesh->diffuseMap->getUri() : "";
+            std::string fileName = std::filesystem::path(fullPath).filename().string();
+
+            drawResourceSlot("Diffuse Map", fileName, fullPath, "ASSET_TEXTURE",
+                // OnDrop
+                [&](const std::string& path) {
+                    auto tex = ResourceManager::Get().getTexture(path);
+                    if (tex) mesh->diffuseMap = tex;
+                },
+                // OnClear
+                [&]() {
+                    mesh->diffuseMap = nullptr;
+                }
+            );
+
+            if (mesh->diffuseMap) // 只有有纹理时才显示这些选项
+            {
+                ImGui::Dummy(ImVec2(0, 5));
+                ImGui::Text("UV Mapping");
+
+                if (mesh->model && !mesh->model->hasUVs()) 
+                {
+                    ImGui::SameLine();
+                    // 黄色警告文字
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), " [!] No UVs"); 
+                    // 注意：如果你没有集成 FontAwesome (ICON_FA...)，可以直接写 "[!]" 或 "No UVs"
+                    
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("This model has no UV coordinates.\nStandard texture mapping will fail.\nTriplanar Mapping is highly recommended.");
+                    }
+                }
+                
+                // 开关
+                ImGui::Checkbox("Use Triplanar Mapping", &mesh->useTriplanar);
+                
+                // 提示信息
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Auto-generate UVs based on world position.\nUseful for models with missing or bad UVs.");
+
+                // 如果开启了，显示缩放滑块
+                if (mesh->useTriplanar) {
+                    ImGui::DragFloat("Tiling Scale", &mesh->triplanarScale, 0.01f, 0.01f, 10.0f);
+                }
+            }
+
+            ImGui::Separator();
+
             // Shininess 总是可以调的
             ImGui::DragFloat("Shininess", &mesh->material.shininess, 1.0f, 1.0f, 256.0f);
+
+            ImGui::Separator();
+
+            ImGui::Text("Advanced (Reflection / Refraction)");
+
+            // 反射率
+            ImGui::SliderFloat("Reflectivity", &mesh->material.reflectivity, 0.0f, 1.0f);
+            
+            // 透明度 (控制折射混合)
+            ImGui::SliderFloat("Transparency", &mesh->material.transparency, 0.0f, 1.0f);
+
+            // 只有当开启透明时，才需要调折射率
+            if (mesh->material.transparency > 0.0f)
+            {
+                // 提供一些常用预设
+                if (ImGui::BeginCombo("IOR Preset", "Custom"))
+                {
+                    if (ImGui::Selectable("Air (1.00)")) mesh->material.refractionIndex = 1.00f;
+                    if (ImGui::Selectable("Water (1.33)")) mesh->material.refractionIndex = 1.33f;
+                    if (ImGui::Selectable("Glass (1.52)")) mesh->material.refractionIndex = 1.52f;
+                    if (ImGui::Selectable("Diamond (2.42)")) mesh->material.refractionIndex = 2.42f;
+                    ImGui::EndCombo();
+                }
+                ImGui::DragFloat("IOR", &mesh->material.refractionIndex, 0.01f, 1.0f, 3.0f);
+            }
 
             ImGui::TreePop();
         }
@@ -413,6 +500,32 @@ void InspectorPanel::drawComponentUI(Component *comp)
 
         ImGui::ColorEdit3("Color", glm::value_ptr(light->color));
         ImGui::DragFloat("Intensity", &light->intensity, 0.1f, 0.0f, 10.0f);
+
+        if (light->type == LightType::Directional) {
+            ImGui::Separator();
+            ImGui::Text("Shadow Settings");
+            
+            // Depth Bias
+            ImGui::DragFloat("Depth Bias", &light->shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pushes the shadow away, which fixes z-fighting.");
+
+            // Normal Bias
+            ImGui::DragFloat("Normal Bias", &light->shadowNormalBias, 0.001f, 0.0f, 1.0f, "%.3f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shrinks the shadow caster along normals, which fixes acne.");
+
+            // [新增] 剔除模式选择
+            const char* cullModeNames[] = { "Cull Back", "Cull Front" };
+            // 简单的逻辑映射：0 -> GL_BACK, 1 -> GL_FRONT
+            int currentCull = (light->shadowCullFace == GL_FRONT) ? 1 : 0;
+
+            if (ImGui::Combo("Shadow Culling", &currentCull, cullModeNames, 2)) {
+                light->shadowCullFace = (currentCull == 1) ? GL_FRONT : GL_BACK;
+            }
+            
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Front: Best for solid objects (no acne).\nBack: Best for thin objects (no leaking).");
+        }
+        }
 
         if (light->type == LightType::Point || light->type == LightType::Spot)
         {
@@ -435,6 +548,81 @@ void InspectorPanel::drawComponentUI(Component *comp)
             {
                 light->outerCutOff = glm::cos(glm::radians(outerDeg));
             }
+        }
+    }
+
+    // --- Case 3: Ref;ection Probe ---
+    else if (comp->getType() == ComponentType::ReflectionProbe)
+    {
+        auto probe = static_cast<ReflectionProbeComponent*>(comp);
+        ImGui::Text("Resolution: %d x %d", probe->resolution, probe->resolution);
+
+        ImGui::DragFloat3("Box Size", glm::value_ptr(probe->boxSize), 0.1f, 0.1f, 100.0f);
+        
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("The size of the room/environment for correct reflections.\nAdjust this to match your walls.");
+        }
+
+        ImGui::TextDisabled("Real-time baked environment map");
+    }
+}
+
+void InspectorPanel::drawResourceSlot(const char* label, 
+                                      const std::string& currentName, 
+                                      const std::string& fullPath,
+                                      const char* payloadType,
+                                      std::function<void(const std::string&)> onDrop,
+                                      std::function<void()> onClear) // 允许传入 nullptr
+{
+    // 1. 绘制左侧标签
+    ImGui::Text("%s", label);
+    
+    // 2. 计算布局
+    bool allowClear = (onClear != nullptr); // [新增] 检查是否有清除回调
+    
+    float clearBtnSize = ImGui::GetFrameHeight();
+    // 如果允许清除，留出 X 按钮的空间；否则占满 (-1.0f)
+    float slotWidth = allowClear ? (ImGui::GetContentRegionAvail().x - clearBtnSize - 5.0f) : -1.0f;
+    
+    // 准备按钮文本
+    std::string btnText = currentName.empty() ? "(None)" : currentName;
+
+    // 3. 资源按钮
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f)); 
+    if (ImGui::Button(btnText.c_str(), ImVec2(slotWidth, 0))) {
+        // 点击逻辑 (可选)
+    }
+    ImGui::PopStyleVar();
+
+    // Tooltip
+    if (ImGui::IsItemHovered() && !fullPath.empty()) {
+        ImGui::SetTooltip("%s", fullPath.c_str());
+    }
+
+    // 4. 拖拽接收
+    if (ImGui::BeginDragDropTarget())
+    {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(payloadType))
+        {
+            const char* path = (const char*)payload->Data;
+            if (onDrop) onDrop(path);
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    // 5. [修改] 只有在允许清除时，才绘制 X 按钮和右键菜单
+    if (allowClear) {
+        ImGui::SameLine();
+        if (ImGui::Button("X", ImVec2(clearBtnSize, 0))) {
+            onClear();
+        }
+        
+        // 右键清除菜单
+        if (ImGui::BeginPopupContextItem()) {
+            if (ImGui::MenuItem("Clear")) {
+                onClear();
+            }
+            ImGui::EndPopup();
         }
     }
 }

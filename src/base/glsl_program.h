@@ -63,6 +63,8 @@ public:
 
     void setUniformBlockBinding(const std::string& name, uint32_t binding) const;
 
+    GLuint getHandle() const { return _handle; }
+
 private:
     GLuint _handle = 0;
 

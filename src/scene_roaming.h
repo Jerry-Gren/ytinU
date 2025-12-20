@@ -49,4 +49,7 @@ private:
     void renderProjectSelector();
     void setupDockspace();
     void updateContentScale();
+
+    // -1 表示不截屏，>0 表示倒计时
+    int _screenshotDelay = -1;
 };

@@ -8,8 +8,12 @@
 #include <atomic>
 
 #include "base/transform.h"
+#include "base/texture2d.h"
 #include "engine/model.h"
 #include "light_structs.h"
+
+// 前置声明
+class GameObject;
 
 enum class MeshShapeType
 {
@@ -21,6 +25,23 @@ enum class MeshShapeType
     Frustum, // 多面棱台
     Plane,
     CustomOBJ // 自定义 OBJ 文件
+};
+
+// ==========================================
+// 组件类型枚举 (用于运行时识别，替代复杂的 dynamic_cast)
+// ==========================================
+enum class ComponentType
+{
+    MeshRenderer,
+    Light,
+    ReflectionProbe
+};
+
+enum class LightType
+{
+    Directional,
+    Point,
+    Spot
 };
 
 // 定义一个结构体来保存生成参数，防止每次切换丢失
@@ -48,28 +69,12 @@ struct MeshParams
     char objPath[256] = "";
 };
 
-// 前置声明
-class GameObject;
-
-// ==========================================
-// 组件类型枚举 (用于运行时识别，替代复杂的 dynamic_cast)
-// ==========================================
-enum class ComponentType
-{
-    MeshRenderer,
-    Light
-};
-
 // ==========================================
 // 0. 辅助：ID 生成器
 // ==========================================
 class IDGenerator {
 public:
-    static int generate() {
-        // 静态原子变量，保证每次调用都会增加，且全局唯一
-        static std::atomic<int> counter{ 1 }; 
-        return counter.fetch_add(1);
-    }
+    static int generate();
 };
 
 // ==========================================
@@ -81,7 +86,7 @@ public:
     GameObject *owner = nullptr;
     bool enabled = true;
 
-    Component() : _instanceId(IDGenerator::generate()) {}
+    Component();
 
     virtual ~Component() = default;
 
@@ -103,6 +108,7 @@ public:
     static constexpr ComponentType Type = ComponentType::MeshRenderer;
 
     std::shared_ptr<Model> model;
+    std::shared_ptr<ImageTexture2D> diffuseMap; // 漫反射贴图
     Material material;
 
     // 是否是Gizmo (编辑器辅助物体，如灯泡图标)，渲染时不受光照影响
@@ -114,29 +120,24 @@ public:
     // 是否使用硬棱角
     bool useFlatShade = false;
 
+    // Texture设置
+    bool useTriplanar = false; // 是否开启三向映射
+    float triplanarScale = 1.0f; // 纹理平铺缩放大小
+
     MeshShapeType shapeType = MeshShapeType::Cube;
     MeshParams params;
 
-    MeshComponent(std::shared_ptr<Model> m, bool gizmo = false)
-        : model(m), isGizmo(gizmo) {}
+    MeshComponent(std::shared_ptr<Model> m, bool gizmo = false);
 
     ComponentType getType() const override { return Type; }
 
-    void setMesh(std::shared_ptr<Model> newModel)
-    {
-        if (newModel) model = newModel; // shared_ptr 赋值会自动处理引用计数
-    }
+    void setMesh(std::shared_ptr<Model> newModel);
 };
 
 // ==========================================
 // 3. 光照组件
 // ==========================================
-enum class LightType
-{
-    Directional,
-    Point,
-    Spot
-};
+
 
 class LightComponent : public Component
 {
@@ -156,13 +157,49 @@ public:
     float cutOff = glm::cos(glm::radians(12.5f));
     float outerCutOff = glm::cos(glm::radians(17.5f));
 
-    LightComponent(LightType t) : type(t) {}
+    // 阴影投射时的剔除面
+    // GL_BACK (0x0405): 剔除背面 (默认，适合闭合物体，解决漏光)
+    // GL_FRONT (0x0404): 剔除正面 (适合解决 Shadow Acne，Unity/UE常用技巧)
+    unsigned int shadowCullFace = GL_BACK;
+
+    // Unity 风格的阴影参数
+    // Depth Bias: 对应 Unity 的 "Bias"，通常很小 (0.001 ~ 0.05)
+    float shadowBias = 0.0010f; 
+    
+    // Normal Bias: 对应 Unity 的 "Normal Bias"，收缩模型的程度 (0.0 ~ 3.0)
+    // 我们的单位是世界坐标单位，所以默认值设小一点，比如 0.02
+    float shadowNormalBias = 0.00f;
+
+    LightComponent(LightType t);
 
     ComponentType getType() const override { return Type; }
 };
 
 // ==========================================
-// 4. 游戏对象
+// 4. 反射探针组件
+// ==========================================
+class ReflectionProbeComponent : public Component
+{
+public:
+    static constexpr ComponentType Type = ComponentType::ReflectionProbe;
+
+    int resolution = 2048;
+    unsigned int textureID = 0;
+    unsigned int fboID = 0;
+    unsigned int rboID = 0;
+    bool isDirty = true;
+    // 影响范围/房间大小 (默认 10x10x10 的房间)
+    glm::vec3 boxSize = glm::vec3(10.0f, 10.0f, 10.0f);
+
+    ReflectionProbeComponent() = default;
+    ~ReflectionProbeComponent(); // 析构移到 cpp (因为它包含 glDelete)
+
+    void initGL(); // 核心逻辑移到 cpp
+    ComponentType getType() const override { return Type; }
+};
+
+// ==========================================
+// 5. 游戏对象
 // ==========================================
 class GameObject
 {
@@ -171,7 +208,7 @@ public:
     Transform transform;
     std::vector<std::unique_ptr<Component>> components;
 
-    GameObject(const std::string &n) : name(n), _instanceId(IDGenerator::generate()) {}
+    GameObject(const std::string &n);
 
     int getInstanceID() const { return _instanceId; }
 
@@ -199,14 +236,7 @@ public:
         return nullptr;
     }
 
-    void removeComponent(Component *comp)
-    {
-        components.erase(
-            std::remove_if(components.begin(), components.end(),
-                           [comp](const std::unique_ptr<Component> &p)
-                           { return p.get() == comp; }),
-            components.end());
-    }
+    void removeComponent(Component *comp);
 
 private:
     int _instanceId;

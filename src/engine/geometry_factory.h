@@ -16,7 +16,7 @@ public:
 
     // 2. 球体 (用于装饰、测试光照)
     // stacks: 纬度切片数, slices: 经度切片数 (越高越圆)
-    static std::shared_ptr<Model> createSphere(float radius = 0.5f, int stacks = 16, int slices = 32);
+    static std::shared_ptr<Model> createSphere(float radius = 0.5f, int stacks = 16, int slices = 32, bool useFlatShade = false);
 
     // -----------------------------------------------------------------------
     // 通用几何生成核心 (Frustum)
@@ -39,4 +39,7 @@ public:
 
     // 7. 多面棱台 (Prism Frustum) - 比如四棱台: topR=0.5, bottomR=1, slices=4
     static std::shared_ptr<Model> createPyramidFrustum(float topRadius, float bottomRadius, float height, int sides = 4, bool useFlatShade = false);
+
+private:
+    static void convertToFlat(std::vector<Vertex>& vertices, std::vector<uint32_t>& indices);
 };

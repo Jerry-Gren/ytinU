@@ -53,6 +53,8 @@ file(GLOB PROJECT_SRC ${SOURCE_PATH}/*.cpp)
 # temp
 file(GLOB ENGINE_HDR ${SOURCE_PATH}/engine/*.h)
 file(GLOB ENGINE_SRC ${SOURCE_PATH}/engine/*.cpp)
+file(GLOB ENGINE_UTIL_HDR ${SOURCE_PATH}/engine/utils/*.h)
+file(GLOB ENGINE_UTIL_SRC ${SOURCE_PATH}/engine/utils/*.cpp)
 file(GLOB EDITOR_HDR ${SOURCE_PATH}/editor/*.h)
 file(GLOB EDITOR_SRC ${SOURCE_PATH}/editor/*.cpp)
 file(GLOB EDITOR_PANEL_HDR ${SOURCE_PATH}/editor/panels/*.h)
@@ -64,6 +66,7 @@ add_executable(
     ${BASE_HDR} ${BASE_SRC}
     ${PROJECT_HDR} ${PROJECT_SRC}
     ${ENGINE_HDR} ${ENGINE_SRC}
+    ${ENGINE_UTIL_HDR} ${ENGINE_UTIL_SRC}
     ${EDITOR_HDR} ${EDITOR_SRC}
     ${EDITOR_PANEL_HDR} ${EDITOR_PANEL_SRC}
 )

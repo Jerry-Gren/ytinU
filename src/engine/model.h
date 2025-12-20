@@ -46,6 +46,8 @@ public:
     {
         return _vertices[i];
     }
+    
+    bool hasUVs() const { return _hasUVs; }
 
 public:
     Transform transform;
@@ -54,6 +56,7 @@ protected:
     // vertices of the table represented in model's own coordinate
     std::vector<Vertex> _vertices;
     std::vector<uint32_t> _indices;
+    bool _hasUVs = false;
 
     // bounding box
     BoundingBox _boundingBox;

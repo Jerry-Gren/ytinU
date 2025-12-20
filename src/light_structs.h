@@ -8,6 +8,10 @@ struct Material
     glm::vec3 diffuse = glm::vec3(0.7f);
     glm::vec3 specular = glm::vec3(0.5f);
     float shininess = 32.0f;
+
+    float reflectivity = 0.0f;    // 反射强度 (0.0 = 无反射, 1.0 = 全镜面)
+    float refractionIndex = 1.0f; // 折射率 (1.0 = 空气, 1.33 = 水, 1.52 = 玻璃, 2.42 = 钻石)
+    float transparency = 0.0f;    // 透明度/折射强度 (0.0 = 不透明, 1.0 = 全透明)
 };
 
 // 平行光 (太阳光)

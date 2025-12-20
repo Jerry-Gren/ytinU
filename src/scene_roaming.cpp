@@ -3,13 +3,14 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include "scene_roaming.h"
-#include "engine/geometry_factory.h"
 #include "ImGuiFileDialog.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/easing.hpp>
 #include <glm/gtx/vector_angle.hpp>
 #include <filesystem>
 #include <algorithm> // for std::sort
+
+#include "engine/utils/image_utils.h"
 
 // 辅助结构：用于排序轴的绘制顺序
 struct GizmoAxisData {
@@ -175,6 +176,12 @@ void SceneRoaming::renderFrame()
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
+    if (ImGui::IsKeyPressed(ImGuiKey_F12, false)) 
+    {
+        // 直接设置延迟，无需自己写 static bool 防抖
+        _screenshotDelay = 1; 
+    }
+
     // 1. 处理输入 (委托给 SceneViewPanel)
     // 它内部会调用 _cameraController->update() 和 handleInput()
     // 需要传入 Scene 指针用于射线检测
@@ -215,6 +222,24 @@ void SceneRoaming::renderFrame()
 
     if (_scene) {
         _scene->destroyMarkedObjects();
+    }
+
+    if (_screenshotDelay > 0)
+    {
+        // 倒计时减一
+        _screenshotDelay--;
+    }
+    else if (_screenshotDelay == 0) // 倒计时结束，执行截屏
+    {
+        int w, h;
+        glfwGetFramebufferSize(_window, &w, &h);
+        std::string path = ResourceManager::Get().getProjectRoot() + "/screenshot.png";
+        
+        // 此时这一帧已经是“没有菜单”的全新一帧了
+        ImageUtils::saveScreenshot(path, w, h);
+        
+        // 重置为 -1，停止截屏
+        _screenshotDelay = -1;
     }
 }
 
@@ -336,6 +361,55 @@ void SceneRoaming::setupDockspace()
     {
         if (ImGui::BeginMenu("File"))
         {
+            // 导入场景按钮
+            if (ImGui::MenuItem("Import as Single Mesh (.obj)"))
+            {
+                IGFD::FileDialogConfig config;
+                config.path = ResourceManager::Get().getProjectRoot();
+                ImGuiFileDialog::Instance()->OpenDialog("ImportMeshKey", "Import Single Mesh", ".obj", config);
+            }
+
+            if (ImGui::MenuItem("Import as Scene (.obj)"))
+            {
+                IGFD::FileDialogConfig config;
+                config.path = ResourceManager::Get().getProjectRoot();
+                
+                ImGuiFileDialog::Instance()->OpenDialog("ImportSceneKey", "Import Scene and Split Objects", ".obj", config);
+            }
+
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Splits the OBJ file into multiple objects based on 'o' or 'g' tags.");
+            }
+
+            // 导出场景按钮
+            if (ImGui::MenuItem("Export Scene (.obj)"))
+            {
+                // 1. 构造保存路径 (默认保存到项目根目录)
+                // 如果你想做得更高级，可以像 Open Project 那样弹出一个 ImGuiFileDialog
+                std::string exportPath = ResourceManager::Get().getProjectRoot() + "/scene_export.obj";
+                
+                // 2. 执行导出
+                if (_scene) {
+                    _scene->exportToOBJ(exportPath);
+                }
+            }
+
+            ImGui::Separator();
+
+            if (ImGui::MenuItem("Save Screenshot (.png)"))
+            {
+                // 1. 立即关闭当前的 Popup 菜单 (让下一帧不渲染它)
+                ImGui::CloseCurrentPopup();
+
+                // 2. 设置延迟帧数
+                // 为什么是 2？
+                // Frame 0 (当前帧): 菜单还在，逻辑处理完。
+                // Frame 1 (下一帧): ImGui 生成了没有菜单的画面，渲染完成 -> 截屏！
+                _screenshotDelay = 2; 
+            }
+
+            ImGui::Separator();
+
             if (ImGui::MenuItem("Exit")) glfwSetWindowShouldClose(_window, true);
             ImGui::EndMenu();
         }
@@ -345,6 +419,41 @@ void SceneRoaming::setupDockspace()
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
+    }
+
+    // 检查并渲染文件对话框
+    if (ImGuiFileDialog::Instance()->Display("ImportMeshKey"))
+    {
+        if (ImGuiFileDialog::Instance()->IsOk())
+        {
+            std::string path = ImGuiFileDialog::Instance()->GetFilePathName();
+            // 调用单体加载逻辑 (你现有的 CustomOBJ 逻辑)
+            // 这里可以直接调用 Scene 里的辅助函数，或者在这里写逻辑
+            // 建议在 Scene 里加一个 importSingleMesh(path)
+            if (_scene) {
+                _scene->importSingleMeshFromOBJ(path);
+            }
+        }
+        ImGuiFileDialog::Instance()->Close();
+    }
+
+    // 这里的 Key "ImportSceneKey" 必须和上面 OpenDialog 里的 Key 一致
+    if (ImGuiFileDialog::Instance()->Display("ImportSceneKey"))
+    {
+        // 如果用户点击了 OK
+        if (ImGuiFileDialog::Instance()->IsOk())
+        {
+            // 获取完整文件路径
+            std::string path = ImGuiFileDialog::Instance()->GetFilePathName();
+            
+            // 调用我们刚刚写好的 Import 逻辑
+            if (_scene) {
+                _scene->importSceneFromOBJ(path);
+            }
+        }
+        
+        // 关闭对话框
+        ImGuiFileDialog::Instance()->Close();
     }
 }
 

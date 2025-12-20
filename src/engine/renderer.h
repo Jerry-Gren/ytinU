@@ -9,6 +9,7 @@
 #include "base/glsl_program.h"
 #include "outline_pass.h"
 #include "geometry_factory.h"
+#include "shadow_map_pass.h"
 
 class Renderer
 {
@@ -35,6 +36,7 @@ private:
     std::unique_ptr<GLSLProgram> _mainShader;
     std::unique_ptr<GLSLProgram> _gridShader;
     std::unique_ptr<GLSLProgram> _skyboxShader;
+    std::unique_ptr<ShadowMapPass> _shadowPass;
 
     // --- 全局模型 ---
     std::shared_ptr<Model> _gridPlane;
@@ -46,5 +48,7 @@ private:
     // --- 内部绘制函数 ---
     void drawSkybox(const glm::mat4& view, const glm::mat4& proj);
     void drawGrid(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos);
-    void drawSceneObjects(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos);
+    void drawSceneObjects(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, const GameObject* excludeObject = nullptr);
+    // 更新场景中的所有反射探针
+    void updateReflectionProbes(const Scene& scene);
 };
