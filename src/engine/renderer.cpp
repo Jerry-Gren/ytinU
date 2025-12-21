@@ -106,12 +106,13 @@ void Renderer::init() {
         // 点光源定义
         struct PointLight {
             vec3 position;
-            float constant;
-            float linear;
-            float quadratic;
+            float range;
             vec3 color;
             float intensity;
             int shadowIndex; // -1 = 无阴影, >=0 = 对应 pointShadowMaps 的下标
+            float shadowStrength; // 阴影深浅
+            float shadowRadius;   // 阴影软硬
+            float shadowBias;
         };
 
         // 聚光灯定义
@@ -120,9 +121,7 @@ void Renderer::init() {
             vec3 direction;
             float cutOff;
             float outerCutOff;
-            float constant;
-            float linear;
-            float quadratic;
+            float range;
             vec3 color;
             float intensity;
         };
@@ -174,7 +173,9 @@ void Renderer::init() {
         vec3 BoxProjectedCubemapDirection(vec3 worldPos, vec3 worldRefDir, vec3 pPos, vec3 boxMin, vec3 boxMax);
 
         float ShadowCalculation(vec3 fragPosWorld, vec3 normal, vec3 lightDir, float viewSpaceDepth, int baseLayerIndex);
-        float CalcPointShadow(vec3 fragPos, vec3 lightPos, int shadowIndex);
+        float CalcPointShadow(vec3 fragPos, vec3 lightPos, int shadowIndex, float range, float radius, float bias);
+
+        float GetAttenuation(float distance, float range);
 
 		// 获取法线辅助函数
 		vec3 getNormal() {
@@ -216,12 +217,12 @@ void Renderer::init() {
             // 计算标准 Phong 光照
             // 先计算全局基础环境光
             // 我们可以取一个固定的环境光颜色，或者取第一个平行光的颜色作为环境基调
-            // 这里为了简单，我们假设环境光是白色的微弱光 (0.05 强度) * 材质的环境光系数
-            vec3 ambient = vec3(0.05) * material.ambient;
+            // 这里为了简单，我们假设环境光是白色的微弱光 (0.02 强度) * 材质的环境光系数
+            vec3 ambient = vec3(0.02) * material.ambient;
             
             // 如果有平行光，我们可以用第一个平行光的颜色来影响环境光，稍微自然一点（可选）
             if (dirLightCount > 0) {
-                ambient = dirLights[0].color * 0.1 * material.ambient; 
+                ambient = dirLights[0].color * 0.05 * material.ambient; 
             }
 
             // 初始化 result 为环境光
@@ -246,7 +247,12 @@ void Renderer::init() {
             for(int i = 0; i < pointLightCount; i++) {
                 float shadow = 1.0;
                 if (pointLights[i].shadowIndex >= 0) {
-                    shadow = CalcPointShadow(FragPos, pointLights[i].position, pointLights[i].shadowIndex);
+                    float rawShadow = CalcPointShadow(FragPos, pointLights[i].position, pointLights[i].shadowIndex, pointLights[i].range, pointLights[i].shadowRadius, pointLights[i].shadowBias);
+                    
+                    // 应用 Shadow Strength (混合: 1.0 = 纯影, 0.0 = 无影)
+                    // 如果 shadow 是 0 (全黑), strength 是 0.8, 结果应为 0.2
+                    // 公式: 最终阴影因子 = mix(1.0, rawShadow, strength);
+                    shadow = mix(1.0, rawShadow, pointLights[i].shadowStrength);
                 }
                 result += CalcPointLight(pointLights[i], norm, FragPos, viewDir, baseDiffuse, shadow);
             }
@@ -406,7 +412,7 @@ void Renderer::init() {
             vec3 lightDir = normalize(light.position - fragPos);
             // 衰减
             float distance = length(light.position - fragPos);
-            float attenuation = 1.0 / (light.constant + light.linear * distance + light.quadratic * (distance * distance));    
+            float attenuation = GetAttenuation(distance, light.range);
             // 漫反射
             float diff = max(dot(normal, lightDir), 0.0);
             // 镜面反射
@@ -422,7 +428,7 @@ void Renderer::init() {
             vec3 lightDir = normalize(light.position - fragPos);
             // 衰减
             float distance = length(light.position - fragPos);
-            float attenuation = 1.0 / (light.constant + light.linear * distance + light.quadratic * (distance * distance));    
+            float attenuation = GetAttenuation(distance, light.range);
             // 聚光强度 (Soft edges)
             float theta = dot(lightDir, normalize(-light.direction)); 
             float epsilon = light.cutOff - light.outerCutOff;
@@ -616,27 +622,25 @@ void Renderer::init() {
         );
 
         // 点光源阴影计算函数
-        float CalcPointShadow(vec3 fragPos, vec3 lightPos, int shadowIndex)
+        float CalcPointShadow(vec3 fragPos, vec3 lightPos, int shadowIndex, float range, float radius, float bias)
         {
-            float farPlane = pointShadowFarPlanes[shadowIndex];
+            // 注意：我们之前用 uniform 传了 pointShadowFarPlanes
+            // 但其实对于现代物理光照，Range 本身就是 FarPlane (光照在 Range 处归零)
+            // 所以我们可以直接用 light.range 作为远平面
+            float farPlane = range; 
+            
             vec3 fragToLight = fragPos - lightPos;
             float currentDepth = length(fragToLight);
             
             float shadow = 0.0;
-            // 稍微调大一点 Bias 防止波纹 (Acne)
-            float bias = 0.15; 
             int samples = 20;
-            
             float viewDistance = length(viewPos - fragPos);
             
-            // [核心修复 1] 调小采样半径
-            // 原来是 / 25.0，现在改为 / 100.0 甚至更小
-            // 这里的公式意图是：观察者离得越远，阴影越模糊（模拟视觉效果），但不能太大
-            float diskRadius = (1.0 + (viewDistance / farPlane)) / 100.0; 
+            // 使用 radius 参数控制模糊程度
+            // 公式：(1 + viewDist/range) * radius / divider
+            // 用户输入的 radius 是 0.0 ~ 0.5
+            float diskRadius = (1.0 + (viewDistance / farPlane)) * radius; 
             
-            // [核心修复 2] 引入随机旋转
-            // 使用 gl_FragCoord 生成随机旋转轴
-            // 这会把"重影"打散成"噪点"，看起来更自然
             float rotX = random(vec3(gl_FragCoord.xy, 1.0), 1);
             float rotY = random(vec3(gl_FragCoord.xy, 1.0), 2);
             float rotZ = random(vec3(gl_FragCoord.xy, 1.0), 3);
@@ -645,13 +649,7 @@ void Renderer::init() {
             for(int i = 0; i < samples; ++i)
             {
                 float closestDepth = 0.0;
-                
-                // 将固定的采样盘方向 反射/旋转 一下
-                vec3 sampleOffset = gridSamplingDisk[i];
-                // 简单的扰动：加上一点随机值 (或者使用 reflect 函数)
-                // 这里用 reflect 简单模拟旋转
-                sampleOffset = reflect(sampleOffset, rotationDir);
-
+                vec3 sampleOffset = reflect(gridSamplingDisk[i], rotationDir);
                 vec3 sampleDir = fragToLight + sampleOffset * diskRadius;
 
                 if (shadowIndex == 0) closestDepth = texture(pointShadowMaps[0], sampleDir).r;
@@ -664,9 +662,26 @@ void Renderer::init() {
                 if(currentDepth - bias > closestDepth)
                     shadow += 1.0;
             }
-            
             shadow /= float(samples);
             return 1.0 - shadow;
+        }
+
+        // 物理正确的窗口化反平方衰减
+        // distance: 像素到光源距离
+        // range: 光源设定的半径
+        float GetAttenuation(float distance, float range) {
+            // 1. 基础反平方 ( Inverse Square Law )
+            // 加一个小数值防止除零 (0.01 或 1.0 取决于单位，这里假设 1 unit = 1 meter)
+            float attenuation = 1.0 / (distance * distance + 1.0); 
+            
+            // 2. 窗口函数 (Windowing Function) - 让光在 range 处平滑归零
+            // 来自 Unreal Engine / Frostbite 的公式
+            float distDivRange = distance / range;
+            float factor = distDivRange * distDivRange; // (d/r)^2
+            factor = factor * factor;                   // (d/r)^4
+            float window = clamp(1.0 - factor, 0.0, 1.0);
+            
+            return attenuation * window * window;
         }
     )";
 
@@ -932,9 +947,7 @@ void Renderer::render(const Scene& scene, Camera* camera,
                 if (light->castShadows && pointShadowInfos.size() < _pointShadowPass->getMaxLights()) {
                     PointShadowInfo info;
                     info.position = go->transform.position;
-                    // 设置一个固定的远平面，用于深度归一化 (比如 50米)
-                    // 更高级的做法是根据光照衰减半径计算：sqrt(1/0.01)/quadratic...
-                    info.farPlane = 50.0f; 
+                    info.farPlane = light->range;
                     info.lightIndex = (int)pointShadowInfos.size(); // 0, 1, 2, 3...
 
                     pointShadowInfos.push_back(info);
@@ -1138,13 +1151,16 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         _mainShader->setUniformVec3(base + ".position", light->owner->transform.position);
         _mainShader->setUniformVec3(base + ".color", light->color);
         _mainShader->setUniformFloat(base + ".intensity", light->intensity);
-        _mainShader->setUniformFloat(base + ".constant", light->constant);
-        _mainShader->setUniformFloat(base + ".linear", light->linear);
-        _mainShader->setUniformFloat(base + ".quadratic", light->quadratic);
+        _mainShader->setUniformFloat(base + ".range", light->range);
 
         int idx = -1;
         if (shadowIndices.count(light)) idx = shadowIndices.at(light);
         _mainShader->setUniformInt(base + ".shadowIndex", idx);
+
+        // 即使 idx == -1 (无阴影)，也可以传进去，反正 Shader 里有 if 判断
+        _mainShader->setUniformFloat(base + ".shadowStrength", light->shadowStrength);
+        _mainShader->setUniformFloat(base + ".shadowRadius", light->shadowRadius);
+        _mainShader->setUniformFloat(base + ".shadowBias", light->shadowBias);
         
         // 顺便更新 Gizmo 颜色 (可选)
         if (auto mesh = light->owner->getComponent<MeshComponent>()) {
@@ -1167,9 +1183,7 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         _mainShader->setUniformFloat(base + ".intensity", light->intensity);
         _mainShader->setUniformFloat(base + ".cutOff", light->cutOff);
         _mainShader->setUniformFloat(base + ".outerCutOff", light->outerCutOff);
-        _mainShader->setUniformFloat(base + ".constant", light->constant);
-        _mainShader->setUniformFloat(base + ".linear", light->linear);
-        _mainShader->setUniformFloat(base + ".quadratic", light->quadratic);
+        _mainShader->setUniformFloat(base + ".range", light->range);
         
         if (auto mesh = light->owner->getComponent<MeshComponent>()) {
             if (mesh->isGizmo) mesh->material.diffuse = light->color;

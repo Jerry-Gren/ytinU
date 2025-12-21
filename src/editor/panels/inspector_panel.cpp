@@ -146,6 +146,15 @@ void InspectorPanel::drawComponentUI(Component *comp)
         auto mesh = static_cast<MeshComponent *>(comp);
         bool needRebuild = false;
 
+        auto lightComp = comp->owner->getComponent<LightComponent>();
+
+        if (lightComp && mesh->isGizmo)
+        {
+            mesh->material.diffuse = lightComp->color;
+            mesh->material.ambient = lightComp->color * 0.1f; 
+            mesh->material.specular = glm::vec3(0.0f); 
+        }
+
         ImGui::Checkbox("Is Gizmo (Unlit)", &mesh->isGizmo);
         ImGui::SameLine();
         ImGui::Checkbox("Double Sided", &mesh->doubleSided);
@@ -374,19 +383,11 @@ void InspectorPanel::drawComponentUI(Component *comp)
 
         ImGui::Separator();
 
-        // 检查宿主是否有点光源组件
-        auto lightComp = comp->owner->getComponent<LightComponent>();
-
         // 材质 UI
         if (ImGui::TreeNode("Material"))
         {
             if (lightComp)
             {
-                // [逻辑] 如果有光源组件，强制同步颜色，并显示提示
-                mesh->material.diffuse = lightComp->color;
-                mesh->material.ambient = lightComp->color * 0.1f; // 简单的关联
-                mesh->material.specular = glm::vec3(0.0f);        // 发光体一般没有高光
-
                 ImGui::TextColored(ImVec4(1, 1, 0, 1), "[Locked]");
                 ImGui::SameLine();
                 ImGui::TextWrapped("Color is controlled by the Light Source component.");
@@ -548,21 +549,29 @@ void InspectorPanel::drawComponentUI(Component *comp)
         if (light->type == LightType::Point || light->type == LightType::Spot)
         {
             ImGui::Text("Point Settings");
-            ImGui::DragFloat("Linear", &light->linear, 0.001f);
-            ImGui::DragFloat("Quadratic", &light->quadratic, 0.001f);
+            ImGui::DragFloat("Range", &light->range, 0.1f, 0.1f, 1000.0f);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("The radius where light intensity falls to zero.");
 
             if (light->castShadows) {
                 ImGui::Indent();
                 ImGui::Text("Shadow Config");
-                // 点光源通常不需要 Normal Bias，只需要一个基础 Bias
-                // 这里复用 shadowBias 变量
                 ImGui::DragFloat("Bias", &light->shadowBias, 0.001f, 0.0f, 0.5f, "%.3f");
+                
+                // 强度和柔和度
+                ImGui::SliderFloat("Strength", &light->shadowStrength, 0.0f, 1.0f);
+                ImGui::SliderFloat("Softness", &light->shadowRadius, 0.0f, 0.5f);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Controls the blur radius of the shadow (PCF).");
+                
                 ImGui::Unindent();
             }
         }
 
         if (light->type == LightType::Spot)
         {
+            ImGui::Text("Spot Settings");
+            // [新增] 聚光灯也应该用 Range
+            ImGui::DragFloat("Range", &light->range, 0.1f, 0.1f, 1000.0f);
+
             ImGui::Text("Spot Angle");
             float innerDeg = glm::degrees(glm::acos(light->cutOff));
             float outerDeg = glm::degrees(glm::acos(light->outerCutOff));

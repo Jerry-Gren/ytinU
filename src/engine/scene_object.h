@@ -153,9 +153,10 @@ public:
     bool castShadows = true;
 
     // 衰减
-    float constant = 1.0f;
-    float linear = 0.09f;
-    float quadratic = 0.032f;
+    // float constant = 1.0f;
+    // float linear = 0.09f;
+    // float quadratic = 0.032f;
+    float range = 10.0f; // 光照有效半径 (米)
 
     // 聚光
     float cutOff = glm::cos(glm::radians(12.5f));
@@ -173,6 +174,10 @@ public:
     // Normal Bias: 对应 Unity 的 "Normal Bias"，收缩模型的程度 (0.0 ~ 3.0)
     // 我们的单位是世界坐标单位，所以默认值设小一点，比如 0.02
     float shadowNormalBias = 0.00f;
+
+    // 阴影艺术控制
+    float shadowStrength = 1.0f; // 0=无阴影, 1=全黑
+    float shadowRadius = 0.05f;  // 控制 PCF 采样范围 (软阴影程度)
 
     LightComponent(LightType t);
 

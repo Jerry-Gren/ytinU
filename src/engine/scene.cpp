@@ -27,6 +27,7 @@ GameObject* Scene::createPointLight()
     auto go = new GameObject("Point Light");
     auto lightComp = go->addComponent<LightComponent>(LightType::Point);
     lightComp->color = glm::vec3(1.0f, 1.0f, 0.0f);
+    lightComp->range = 10.0f;
 
     // 光源可视化 (Gizmo)
     auto meshComp = go->addComponent<MeshComponent>(GeometryFactory::createSphere(0.2f), true);
