@@ -150,9 +150,11 @@ void InspectorPanel::drawComponentUI(Component *comp)
 
         if (lightComp && mesh->isGizmo)
         {
-            mesh->material.diffuse = lightComp->color;
-            mesh->material.ambient = lightComp->color * 0.1f; 
-            mesh->material.specular = glm::vec3(0.0f); 
+            // Gizmo 通常只需要设置 albedo 即可
+            mesh->material.albedo = lightComp->color; 
+            // 可以顺便把 PBR 参数设为无光泽，防止 Gizmo 反光
+            mesh->material.metallic = 0.0f;
+            mesh->material.roughness = 1.0f;
         }
 
         ImGui::Checkbox("Is Gizmo (Unlit)", &mesh->isGizmo);
@@ -384,7 +386,7 @@ void InspectorPanel::drawComponentUI(Component *comp)
         ImGui::Separator();
 
         // 材质 UI
-        if (ImGui::TreeNode("Material"))
+        if (ImGui::TreeNode("PBR Material"))
         {
             if (lightComp)
             {
@@ -393,24 +395,26 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 ImGui::TextWrapped("Color is controlled by the Light Source component.");
 
                 // 仅显示只读的颜色预览 (使用 ColorButton)
-                ImGui::ColorButton("##preview", ImVec4(mesh->material.diffuse.r, mesh->material.diffuse.g, mesh->material.diffuse.b, 1.0f));
+                ImGui::ColorButton("##prev", ImVec4(mesh->material.albedo.r, mesh->material.albedo.g, mesh->material.albedo.b, 1));
             }
             else
             {
                 // [逻辑] 没有光源组件，正常显示编辑器
-                ImGui::ColorEdit3("Ambient", glm::value_ptr(mesh->material.ambient));
-                ImGui::ColorEdit3("Diffuse", glm::value_ptr(mesh->material.diffuse));
-                ImGui::ColorEdit3("Specular", glm::value_ptr(mesh->material.specular));
+                // PBR 参数滑块
+                ImGui::ColorEdit3("Albedo", glm::value_ptr(mesh->material.albedo));
+                ImGui::SliderFloat("Metallic", &mesh->material.metallic, 0.0f, 1.0f);
+                ImGui::SliderFloat("Roughness", &mesh->material.roughness, 0.0f, 1.0f);
+                ImGui::SliderFloat("AO", &mesh->material.ao, 0.0f, 1.0f);
             }
 
-            // 2. [新增] 纹理贴图设置 (Texture Map)
+            // 纹理贴图设置 (Texture Map)
             ImGui::Spacing();
             ImGui::Separator();
         
             std::string fullPath = mesh->diffuseMap ? mesh->diffuseMap->getUri() : "";
             std::string fileName = std::filesystem::path(fullPath).filename().string();
 
-            drawResourceSlot("Diffuse Map", fileName, fullPath, "ASSET_TEXTURE",
+            drawResourceSlot("Albedo Map", fileName, fullPath, "ASSET_TEXTURE",
                 // OnDrop
                 [&](const std::string& path) {
                     auto tex = ResourceManager::Get().getTexture(path);
@@ -448,14 +452,100 @@ void InspectorPanel::drawComponentUI(Component *comp)
 
                 // 如果开启了，显示缩放滑块
                 if (mesh->useTriplanar) {
-                    ImGui::DragFloat("Tiling Scale", &mesh->triplanarScale, 0.01f, 0.01f, 10.0f);
+                    ImGui::DragFloat("Tiling", &mesh->triplanarScale, 0.01f, 0.01f, 10.0f);
+                    
+                    ImGui::Dummy(ImVec2(0, 5));
+                    ImGui::Text("Detailed Controls:");
+                    
+                    // 定义一个临时 Helper Lambda，用于画带吸附功能的滑块
+                    auto DrawRotSlider = [](const char* label, float& val) {
+                        // 宽度稍微设小一点以适应分栏
+                        ImGui::PushItemWidth(-1); 
+                        if (ImGui::SliderFloat(label, &val, 0.0f, 270.0f, "%.0f")) {
+                            val = floor((val + 45.0f) / 90.0f) * 90.0f;
+                        }
+                        ImGui::PopItemWidth();
+                    };
+
+                    // 使用两列布局：左边是正轴，右边是负轴
+                    ImGui::Columns(2, "TriplanarDetailed", true); // true = 显示中间的分隔线
+                    
+                    // --- 表头 ---
+                    ImGui::Text("Positive (+)"); 
+                    ImGui::NextColumn();
+                    ImGui::Text("Negative (-)");
+                    ImGui::NextColumn();
+                    ImGui::Separator();
+
+                    // --- X 轴行 ---
+                    ImGui::Text("Right (+X)");
+                    DrawRotSlider("##RotPosX", mesh->triRotPosX);
+                    ImGui::Checkbox("Flip##PosX", &mesh->triFlipPosX);
+                    
+                    ImGui::NextColumn(); // ----------------------
+                    
+                    ImGui::Text("Left (-X)");
+                    DrawRotSlider("##RotNegX", mesh->triRotNegX);
+                    ImGui::Checkbox("Flip##NegX", &mesh->triFlipNegX);
+                    
+                    ImGui::NextColumn(); 
+                    ImGui::Separator();
+
+                    // --- Y 轴行 ---
+                    ImGui::Text("Top (+Y)");
+                    DrawRotSlider("##RotPosY", mesh->triRotPosY);
+                    ImGui::Checkbox("Flip##PosY", &mesh->triFlipPosY);
+
+                    ImGui::NextColumn(); // ----------------------
+
+                    ImGui::Text("Bottom (-Y)");
+                    DrawRotSlider("##RotNegY", mesh->triRotNegY);
+                    ImGui::Checkbox("Flip##NegY", &mesh->triFlipNegY);
+
+                    ImGui::NextColumn();
+                    ImGui::Separator();
+
+                    // --- Z 轴行 ---
+                    ImGui::Text("Front (+Z)");
+                    DrawRotSlider("##RotPosZ", mesh->triRotPosZ);
+                    ImGui::Checkbox("Flip##PosZ", &mesh->triFlipPosZ);
+
+                    ImGui::NextColumn(); // ----------------------
+
+                    ImGui::Text("Back (-Z)");
+                    DrawRotSlider("##RotNegZ", mesh->triRotNegZ);
+                    ImGui::Checkbox("Flip##NegZ", &mesh->triFlipNegZ);
+
+                    // --- 结束 ---
+                    ImGui::Columns(1); 
+                    ImGui::Separator();
                 }
             }
 
-            ImGui::Separator();
+            std::string normPath = mesh->normalMap ? mesh->normalMap->getUri() : "";
+            std::string normName = std::filesystem::path(normPath).filename().string();
 
-            // Shininess 总是可以调的
-            ImGui::DragFloat("Shininess", &mesh->material.shininess, 1.0f, 1.0f, 256.0f);
+            drawResourceSlot("Normal Map", normName, normPath, "ASSET_TEXTURE",
+                [&](const std::string& path) {
+                    auto tex = ResourceManager::Get().getTexture(path);
+                    if (tex) mesh->normalMap = tex;
+                },
+                [&]() { mesh->normalMap = nullptr; }
+            );
+
+            if (mesh->normalMap)
+            {
+                ImGui::Indent();
+                
+                ImGui::DragFloat("Strength", &mesh->normalStrength, 0.05f, 0.0f, 5.0f);
+                ImGui::Checkbox("Flip Y (DirectX)", &mesh->flipNormalY);
+                
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Check this if the bumps look inverted.\n(Common for DirectX/Unreal assets)");
+                }
+                
+                ImGui::Unindent();
+            }
 
             ImGui::Separator();
 
@@ -610,6 +700,8 @@ void InspectorPanel::drawResourceSlot(const char* label,
                                       std::function<void(const std::string&)> onDrop,
                                       std::function<void()> onClear) // 允许传入 nullptr
 {
+    ImGui::PushID(label);
+
     // 1. 绘制左侧标签
     ImGui::Text("%s", label);
     
@@ -661,4 +753,6 @@ void InspectorPanel::drawResourceSlot(const char* label,
             ImGui::EndPopup();
         }
     }
+
+    ImGui::PopID();
 }

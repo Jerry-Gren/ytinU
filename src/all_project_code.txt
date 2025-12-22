@@ -6,14 +6,22 @@
 // 材质属性
 struct Material
 {
-    glm::vec3 ambient = glm::vec3(0.1f);
-    glm::vec3 diffuse = glm::vec3(0.7f);
-    glm::vec3 specular = glm::vec3(0.5f);
-    float shininess = 32.0f;
+    // --- PBR 核心参数 ---
+    glm::vec3 albedo = glm::vec3(1.0f); // 基础色 (原 diffuse)
+    float metallic = 0.0f;              // 金属度 (0=绝缘体, 1=金属)
+    float roughness = 0.5f;             // 粗糙度 (0=光滑, 1=粗糙)
+    float ao = 1.0f;                    // 环境光遮蔽 (Ambient Occlusion)
 
-    float reflectivity = 0.0f;    // 反射强度 (0.0 = 无反射, 1.0 = 全镜面)
-    float refractionIndex = 1.0f; // 折射率 (1.0 = 空气, 1.33 = 水, 1.52 = 玻璃, 2.42 = 钻石)
-    float transparency = 0.0f;    // 透明度/折射强度 (0.0 = 不透明, 1.0 = 全透明)
+    // --- 透明/玻璃高级参数 ---
+    // PBR 工作流中，F0 (反射率) 通常由 metallic 决定
+    // 但为了兼容你的玻璃效果，我们保留 IOR 和 transparency
+    float refractionIndex = 1.52f; // 折射率 (玻璃默认 1.52)
+    float transparency = 0.0f;     // 透明度 (0=不透明)
+    
+    // [兼容性保留] 
+    // 反射率 (Reflectivity) 在 PBR 中通常不需要手动调 (非金属固定0.04，金属等于Albedo)
+    // 但为了让现在的 Shader 能跑，或者作为额外的艺术控制，我们暂时保留它
+    float reflectivity = 0.5f;
 };
 
 // 平行光 (太阳光)
@@ -1687,6 +1695,17 @@ void InspectorPanel::drawComponentUI(Component *comp)
         auto mesh = static_cast<MeshComponent *>(comp);
         bool needRebuild = false;
 
+        auto lightComp = comp->owner->getComponent<LightComponent>();
+
+        if (lightComp && mesh->isGizmo)
+        {
+            // Gizmo 通常只需要设置 albedo 即可
+            mesh->material.albedo = lightComp->color; 
+            // 可以顺便把 PBR 参数设为无光泽，防止 Gizmo 反光
+            mesh->material.metallic = 0.0f;
+            mesh->material.roughness = 1.0f;
+        }
+
         ImGui::Checkbox("Is Gizmo (Unlit)", &mesh->isGizmo);
         ImGui::SameLine();
         ImGui::Checkbox("Double Sided", &mesh->doubleSided);
@@ -1915,42 +1934,36 @@ void InspectorPanel::drawComponentUI(Component *comp)
 
         ImGui::Separator();
 
-        // 检查宿主是否有点光源组件
-        auto lightComp = comp->owner->getComponent<LightComponent>();
-
         // 材质 UI
-        if (ImGui::TreeNode("Material"))
+        if (ImGui::TreeNode("PBR Material"))
         {
             if (lightComp)
             {
-                // [逻辑] 如果有光源组件，强制同步颜色，并显示提示
-                mesh->material.diffuse = lightComp->color;
-                mesh->material.ambient = lightComp->color * 0.1f; // 简单的关联
-                mesh->material.specular = glm::vec3(0.0f);        // 发光体一般没有高光
-
                 ImGui::TextColored(ImVec4(1, 1, 0, 1), "[Locked]");
                 ImGui::SameLine();
                 ImGui::TextWrapped("Color is controlled by the Light Source component.");
 
                 // 仅显示只读的颜色预览 (使用 ColorButton)
-                ImGui::ColorButton("##preview", ImVec4(mesh->material.diffuse.r, mesh->material.diffuse.g, mesh->material.diffuse.b, 1.0f));
+                ImGui::ColorButton("##prev", ImVec4(mesh->material.albedo.r, mesh->material.albedo.g, mesh->material.albedo.b, 1));
             }
             else
             {
                 // [逻辑] 没有光源组件，正常显示编辑器
-                ImGui::ColorEdit3("Ambient", glm::value_ptr(mesh->material.ambient));
-                ImGui::ColorEdit3("Diffuse", glm::value_ptr(mesh->material.diffuse));
-                ImGui::ColorEdit3("Specular", glm::value_ptr(mesh->material.specular));
+                // PBR 参数滑块
+                ImGui::ColorEdit3("Albedo", glm::value_ptr(mesh->material.albedo));
+                ImGui::SliderFloat("Metallic", &mesh->material.metallic, 0.0f, 1.0f);
+                ImGui::SliderFloat("Roughness", &mesh->material.roughness, 0.0f, 1.0f);
+                ImGui::SliderFloat("AO", &mesh->material.ao, 0.0f, 1.0f);
             }
 
-            // 2. [新增] 纹理贴图设置 (Texture Map)
+            // 纹理贴图设置 (Texture Map)
             ImGui::Spacing();
             ImGui::Separator();
         
             std::string fullPath = mesh->diffuseMap ? mesh->diffuseMap->getUri() : "";
             std::string fileName = std::filesystem::path(fullPath).filename().string();
 
-            drawResourceSlot("Diffuse Map", fileName, fullPath, "ASSET_TEXTURE",
+            drawResourceSlot("Albedo Map", fileName, fullPath, "ASSET_TEXTURE",
                 // OnDrop
                 [&](const std::string& path) {
                     auto tex = ResourceManager::Get().getTexture(path);
@@ -1988,14 +2001,100 @@ void InspectorPanel::drawComponentUI(Component *comp)
 
                 // 如果开启了，显示缩放滑块
                 if (mesh->useTriplanar) {
-                    ImGui::DragFloat("Tiling Scale", &mesh->triplanarScale, 0.01f, 0.01f, 10.0f);
+                    ImGui::DragFloat("Tiling", &mesh->triplanarScale, 0.01f, 0.01f, 10.0f);
+                    
+                    ImGui::Dummy(ImVec2(0, 5));
+                    ImGui::Text("Detailed Controls:");
+                    
+                    // 定义一个临时 Helper Lambda，用于画带吸附功能的滑块
+                    auto DrawRotSlider = [](const char* label, float& val) {
+                        // 宽度稍微设小一点以适应分栏
+                        ImGui::PushItemWidth(-1); 
+                        if (ImGui::SliderFloat(label, &val, 0.0f, 270.0f, "%.0f")) {
+                            val = floor((val + 45.0f) / 90.0f) * 90.0f;
+                        }
+                        ImGui::PopItemWidth();
+                    };
+
+                    // 使用两列布局：左边是正轴，右边是负轴
+                    ImGui::Columns(2, "TriplanarDetailed", true); // true = 显示中间的分隔线
+                    
+                    // --- 表头 ---
+                    ImGui::Text("Positive (+)"); 
+                    ImGui::NextColumn();
+                    ImGui::Text("Negative (-)");
+                    ImGui::NextColumn();
+                    ImGui::Separator();
+
+                    // --- X 轴行 ---
+                    ImGui::Text("Right (+X)");
+                    DrawRotSlider("##RotPosX", mesh->triRotPosX);
+                    ImGui::Checkbox("Flip##PosX", &mesh->triFlipPosX);
+                    
+                    ImGui::NextColumn(); // ----------------------
+                    
+                    ImGui::Text("Left (-X)");
+                    DrawRotSlider("##RotNegX", mesh->triRotNegX);
+                    ImGui::Checkbox("Flip##NegX", &mesh->triFlipNegX);
+                    
+                    ImGui::NextColumn(); 
+                    ImGui::Separator();
+
+                    // --- Y 轴行 ---
+                    ImGui::Text("Top (+Y)");
+                    DrawRotSlider("##RotPosY", mesh->triRotPosY);
+                    ImGui::Checkbox("Flip##PosY", &mesh->triFlipPosY);
+
+                    ImGui::NextColumn(); // ----------------------
+
+                    ImGui::Text("Bottom (-Y)");
+                    DrawRotSlider("##RotNegY", mesh->triRotNegY);
+                    ImGui::Checkbox("Flip##NegY", &mesh->triFlipNegY);
+
+                    ImGui::NextColumn();
+                    ImGui::Separator();
+
+                    // --- Z 轴行 ---
+                    ImGui::Text("Front (+Z)");
+                    DrawRotSlider("##RotPosZ", mesh->triRotPosZ);
+                    ImGui::Checkbox("Flip##PosZ", &mesh->triFlipPosZ);
+
+                    ImGui::NextColumn(); // ----------------------
+
+                    ImGui::Text("Back (-Z)");
+                    DrawRotSlider("##RotNegZ", mesh->triRotNegZ);
+                    ImGui::Checkbox("Flip##NegZ", &mesh->triFlipNegZ);
+
+                    // --- 结束 ---
+                    ImGui::Columns(1); 
+                    ImGui::Separator();
                 }
             }
 
-            ImGui::Separator();
+            std::string normPath = mesh->normalMap ? mesh->normalMap->getUri() : "";
+            std::string normName = std::filesystem::path(normPath).filename().string();
 
-            // Shininess 总是可以调的
-            ImGui::DragFloat("Shininess", &mesh->material.shininess, 1.0f, 1.0f, 256.0f);
+            drawResourceSlot("Normal Map", normName, normPath, "ASSET_TEXTURE",
+                [&](const std::string& path) {
+                    auto tex = ResourceManager::Get().getTexture(path);
+                    if (tex) mesh->normalMap = tex;
+                },
+                [&]() { mesh->normalMap = nullptr; }
+            );
+
+            if (mesh->normalMap)
+            {
+                ImGui::Indent();
+                
+                ImGui::DragFloat("Strength", &mesh->normalStrength, 0.05f, 0.0f, 5.0f);
+                ImGui::Checkbox("Flip Y (DirectX)", &mesh->flipNormalY);
+                
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Check this if the bumps look inverted.\n(Common for DirectX/Unreal assets)");
+                }
+                
+                ImGui::Unindent();
+            }
 
             ImGui::Separator();
 
@@ -2042,41 +2141,76 @@ void InspectorPanel::drawComponentUI(Component *comp)
         ImGui::ColorEdit3("Color", glm::value_ptr(light->color));
         ImGui::DragFloat("Intensity", &light->intensity, 0.1f, 0.0f, 10.0f);
 
+        // 平行光和点光源现在都支持阴影，聚光灯暂时不支持（可以置灰）
+        bool supportsShadows = (light->type == LightType::Directional || light->type == LightType::Point);
+        if (!supportsShadows) ImGui::BeginDisabled();
+        ImGui::Checkbox("Cast Shadows", &light->castShadows);
+        if (!supportsShadows) ImGui::EndDisabled();
+
+        ImGui::Separator();
+
         if (light->type == LightType::Directional) {
-            ImGui::Separator();
-            ImGui::Text("Shadow Settings");
+            ImGui::Text("Directional Settings");
             
-            // Depth Bias
-            ImGui::DragFloat("Depth Bias", &light->shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pushes the shadow away, which fixes z-fighting.");
+            // 2. 只有开启阴影时才显示详细参数
+            if (light->castShadows)
+            {
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Hardware Limit: Only the first 4 active shadow-casting lights will render shadows.");
+                }
+                
+                ImGui::Indent(); // 缩进一下，表示层级关系
+                ImGui::Text("Shadow Settings");
+                
+                // Depth Bias
+                ImGui::DragFloat("Depth Bias", &light->shadowBias, 0.0001f, 0.0f, 0.1f, "%.4f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pushes the shadow away, which fixes z-fighting.");
 
-            // Normal Bias
-            ImGui::DragFloat("Normal Bias", &light->shadowNormalBias, 0.001f, 0.0f, 1.0f, "%.3f");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shrinks the shadow caster along normals, which fixes acne.");
+                // Normal Bias
+                ImGui::DragFloat("Normal Bias", &light->shadowNormalBias, 0.001f, 0.0f, 1.0f, "%.3f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shrinks the shadow caster along normals, which fixes acne.");
 
-            // [新增] 剔除模式选择
-            const char* cullModeNames[] = { "Cull Back", "Cull Front" };
-            // 简单的逻辑映射：0 -> GL_BACK, 1 -> GL_FRONT
-            int currentCull = (light->shadowCullFace == GL_FRONT) ? 1 : 0;
+                // 剔除模式
+                const char* cullModeNames[] = { "Cull Back", "Cull Front" };
+                int currentCull = (light->shadowCullFace == GL_FRONT) ? 1 : 0;
 
-            if (ImGui::Combo("Shadow Culling", &currentCull, cullModeNames, 2)) {
-                light->shadowCullFace = (currentCull == 1) ? GL_FRONT : GL_BACK;
-            }
-            
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Front: Best for solid objects (no acne).\nBack: Best for thin objects (no leaking).");
+                if (ImGui::Combo("Cull Face", &currentCull, cullModeNames, 2)) {
+                    light->shadowCullFace = (currentCull == 1) ? GL_FRONT : GL_BACK;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Front: Best for solid objects (no acne).\nBack: Best for thin objects (no leaking).");
+                }
+                
+                ImGui::Unindent();
             }
         }
 
         if (light->type == LightType::Point || light->type == LightType::Spot)
         {
-            ImGui::Text("Attenuation");
-            ImGui::DragFloat("Linear", &light->linear, 0.001f);
-            ImGui::DragFloat("Quadratic", &light->quadratic, 0.001f);
+            ImGui::Text("Point Settings");
+            ImGui::DragFloat("Range", &light->range, 0.1f, 0.1f, 1000.0f);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("The radius where light intensity falls to zero.");
+
+            if (light->castShadows) {
+                ImGui::Indent();
+                ImGui::Text("Shadow Config");
+                ImGui::DragFloat("Bias", &light->shadowBias, 0.001f, 0.0f, 0.5f, "%.3f");
+                
+                // 强度和柔和度
+                ImGui::SliderFloat("Strength", &light->shadowStrength, 0.0f, 1.0f);
+                ImGui::SliderFloat("Softness", &light->shadowRadius, 0.0f, 0.5f);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Controls the blur radius of the shadow (PCF).");
+                
+                ImGui::Unindent();
+            }
         }
 
         if (light->type == LightType::Spot)
         {
+            ImGui::Text("Spot Settings");
+            // [新增] 聚光灯也应该用 Range
+            ImGui::DragFloat("Range", &light->range, 0.1f, 0.1f, 1000.0f);
+
             ImGui::Text("Spot Angle");
             float innerDeg = glm::degrees(glm::acos(light->cutOff));
             float outerDeg = glm::degrees(glm::acos(light->outerCutOff));
@@ -2115,6 +2249,8 @@ void InspectorPanel::drawResourceSlot(const char* label,
                                       std::function<void(const std::string&)> onDrop,
                                       std::function<void()> onClear) // 允许传入 nullptr
 {
+    ImGui::PushID(label);
+
     // 1. 绘制左侧标签
     ImGui::Text("%s", label);
     
@@ -2166,6 +2302,8 @@ void InspectorPanel::drawResourceSlot(const char* label,
             ImGui::EndPopup();
         }
     }
+
+    ImGui::PopID();
 }
 ```
 
@@ -2843,6 +2981,8 @@ std::shared_ptr<Model> GeometryFactory::createFrustum(float topRadius, float bot
         convertToFlat(vertices, indices);
     }
 
+    computeTangents(vertices, indices);
+
     return std::make_unique<Model>(vertices, indices);
 }
 
@@ -2889,6 +3029,8 @@ std::shared_ptr<Model> GeometryFactory::createCube(float size)
             Vertex{glm::vec3(h, -h, h), glm::vec3(0, -1, 0), glm::vec2(1, 1)},
             Vertex{glm::vec3(-h, -h, h), glm::vec3(0, -1, 0), glm::vec2(0, 1)});
 
+    computeTangents(vertices, indices);
+
     return std::make_unique<Model>(vertices, indices);
 }
 
@@ -2906,6 +3048,8 @@ std::shared_ptr<Model> GeometryFactory::createPlane(float width, float depth)
             Vertex{glm::vec3(w, 0, -d), glm::vec3(0, 1, 0), glm::vec2(width, depth)}, // 右上
             Vertex{glm::vec3(-w, 0, -d), glm::vec3(0, 1, 0), glm::vec2(0, depth)}     // 左上
     );
+
+    computeTangents(vertices, indices);
 
     return std::make_unique<Model>(vertices, indices);
 }
@@ -2958,6 +3102,8 @@ std::shared_ptr<Model> GeometryFactory::createSphere(float radius, int stacks, i
         convertToFlat(vertices, indices);
     }
 
+    computeTangents(vertices, indices);
+
     return std::make_unique<Model>(vertices, indices);
 }
 
@@ -2981,6 +3127,49 @@ std::shared_ptr<Model> GeometryFactory::createPyramidFrustum(float topRadius, fl
 {
     // 棱台本质上就是 slices 很少的圆台
     return createFrustum(topRadius, bottomRadius, height, sides, useFlatShade);
+}
+
+void GeometryFactory::computeTangents(std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices)
+{
+    // 1. 初始化所有切线为 0
+    for (auto& v : vertices) {
+        v.tangent = glm::vec3(0.0f);
+    }
+
+    // 2. 遍历所有三角形，累加切线
+    for (size_t i = 0; i < indices.size(); i += 3)
+    {
+        Vertex& v0 = vertices[indices[i]];
+        Vertex& v1 = vertices[indices[i+1]];
+        Vertex& v2 = vertices[indices[i+2]];
+
+        glm::vec3 edge1 = v1.position - v0.position;
+        glm::vec3 edge2 = v2.position - v0.position;
+
+        glm::vec2 deltaUV1 = v1.texCoord - v0.texCoord;
+        glm::vec2 deltaUV2 = v2.texCoord - v0.texCoord;
+
+        float f = 1.0f / (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y);
+
+        glm::vec3 tangent;
+        tangent.x = f * (deltaUV2.y * edge1.x - deltaUV1.y * edge2.x);
+        tangent.y = f * (deltaUV2.y * edge1.y - deltaUV1.y * edge2.y);
+        tangent.z = f * (deltaUV2.y * edge1.z - deltaUV1.y * edge2.z);
+
+        // 累加到三个顶点上 (平滑切线)
+        v0.tangent += tangent;
+        v1.tangent += tangent;
+        v2.tangent += tangent;
+    }
+
+    // 3. 正交化 (Gram-Schmidt) 并归一化
+    for (auto& v : vertices)
+    {
+        // 重新正交化，确保切线垂直于法线
+        v.tangent = glm::normalize(v.tangent - v.normal * glm::dot(v.normal, v.tangent));
+        
+        // (可选) 这里可以计算 Bitangent 的手性并存储到 w 分量，但目前我们先只算 Tangent
+    }
 }
 ```
 
@@ -3028,6 +3217,9 @@ public:
     // 7. 多面棱台 (Prism Frustum) - 比如四棱台: topR=0.5, bottomR=1, slices=4
     static std::shared_ptr<Model> createPyramidFrustum(float topRadius, float bottomRadius, float height, int sides = 4, bool useFlatShade = false);
 
+    // 通用切线计算函数 (修改 vertices 数组的内容)
+    static void computeTangents(std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices);
+    
 private:
     static void convertToFlat(std::vector<Vertex>& vertices, std::vector<uint32_t>& indices);
 };
@@ -3169,15 +3361,22 @@ void Model::initGLResources()
 
     // specify layout, size of a vertex, data type, normalize, sizeof vertex array, offset of the
     // attribute
+    // location 0: position
     glVertexAttribPointer(
         0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, position));
     glEnableVertexAttribArray(0);
+    // location 1: normal
     glVertexAttribPointer(
         1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, normal));
     glEnableVertexAttribArray(1);
+    // location 2: texCoord
     glVertexAttribPointer(
         2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, texCoord));
     glEnableVertexAttribArray(2);
+    // location 3: tangent
+    glVertexAttribPointer(
+        3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, tangent));
+    glEnableVertexAttribArray(3);
 
     glBindVertexArray(0);
 }
@@ -3393,6 +3592,7 @@ protected:
 ./engine/obj_loader.cpp:
 ```
 #include "obj_loader.h"
+#include "geometry_factory.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -3572,6 +3772,10 @@ MeshData OBJLoader::load(const std::string& filepath, bool useFlatShade) {
             v2.normal = normal;
         }
     }
+
+    // 既然我们已经有了 meshData (vertices/indices)，直接借用 GeometryFactory 的算法
+    // 需要 include "geometry_factory.h"
+    GeometryFactory::computeTangents(meshData.vertices, meshData.indices);
 
     std::cout << "Loaded OBJ: " << filepath << "\n" 
               << "  Vertices: " << meshData.vertices.size() << "\n" 
@@ -4309,6 +4513,250 @@ public:
 };
 ```
 
+./engine/point_shadow_pass.cpp:
+```
+#include "point_shadow_pass.h"
+#include <iostream>
+#include <glm/gtc/matrix_transform.hpp>
+
+PointShadowPass::PointShadowPass(int resolution, int maxLights)
+    : _resolution(resolution), _maxLights(maxLights)
+{
+    initShader();
+    initResources();
+}
+
+PointShadowPass::~PointShadowPass()
+{
+    for (const auto& buf : _shadowBuffers) {
+        if (buf.fbo) glDeleteFramebuffers(1, &buf.fbo);
+        if (buf.texture) glDeleteTextures(1, &buf.texture);
+    }
+}
+
+void PointShadowPass::initResources()
+{
+    _shadowBuffers.resize(_maxLights);
+
+    for (int i = 0; i < _maxLights; ++i) {
+        // 1. 创建 Cubemap
+        glGenTextures(1, &_shadowBuffers[i].texture);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, _shadowBuffers[i].texture);
+
+        for (unsigned int face = 0; face < 6; ++face) {
+            // 使用 GL_FLOAT 存储线性深度
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_DEPTH_COMPONENT24, 
+                         _resolution, _resolution, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+        }
+
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+        // 2. 创建 FBO
+        glGenFramebuffers(1, &_shadowBuffers[i].fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, _shadowBuffers[i].fbo);
+        
+        // 将 Cubemap 绑定为 Depth Attachment
+        // 注意：如果是颜色纹理，通常需要用 Geometry Shader 动态分发
+        // 但对于深度纹理，glFramebufferTexture 允许我们将整个 Cubemap 绑上去
+        // 并在 Geometry Shader 中通过 gl_Layer 控制写入哪一面
+        glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, _shadowBuffers[i].texture, 0);
+        
+        // 不需要颜色缓冲
+        glDrawBuffer(GL_NONE);
+        glReadBuffer(GL_NONE);
+
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            std::cout << "ERROR::PointShadowFBO[" << i << "]:: Framebuffer is not complete!" << std::endl;
+            
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
+}
+
+void PointShadowPass::initShader()
+{
+    // Vertex Shader: 转到世界空间
+    const char* vsCode = R"(
+        #version 330 core
+        layout (location = 0) in vec3 aPos;
+        uniform mat4 model;
+        void main() {
+            gl_Position = model * vec4(aPos, 1.0);
+        }
+    )";
+
+    // [核心] Geometry Shader: 一次生成 6 个面
+    const char* gsCode = R"(
+        #version 330 core
+        layout (triangles) in;
+        layout (triangle_strip, max_vertices=18) out;
+
+        uniform mat4 shadowMatrices[6]; // 6个方向的 ViewProj 矩阵
+
+        out vec4 FragPos; // 传递给 FS 计算距离
+
+        void main() {
+            for(int face = 0; face < 6; ++face) {
+                gl_Layer = face; // 指定输出到 Cubemap 的哪个面
+                for(int i = 0; i < 3; ++i) {
+                    FragPos = gl_in[i].gl_Position;
+                    gl_Position = shadowMatrices[face] * FragPos;
+                    EmitVertex();
+                }
+                EndPrimitive();
+            }
+        }
+    )";
+
+    // Fragment Shader: 写入线性深度
+    const char* fsCode = R"(
+        #version 330 core
+        in vec4 FragPos;
+
+        uniform vec3 lightPos;
+        uniform float farPlane;
+
+        void main() {
+            float lightDistance = length(FragPos.xyz - lightPos);
+            
+            // 映射到 [0, 1] 范围
+            lightDistance = lightDistance / farPlane;
+            
+            // 手动写入深度 (修改 gl_FragDepth)
+            gl_FragDepth = lightDistance;
+        }
+    )";
+
+    _shader.reset(new GLSLProgram);
+    _shader->attachVertexShader(vsCode);
+    _shader->attachGeometryShader(gsCode); // 别忘了这个
+    _shader->attachFragmentShader(fsCode);
+    _shader->link();
+}
+
+void PointShadowPass::render(const Scene& scene, const std::vector<PointShadowInfo>& lightInfos)
+{
+    _shader->use();
+    
+    // 渲染尺寸
+    glViewport(0, 0, _resolution, _resolution);
+    
+    // 遍历每一个需要投射阴影的光源
+    for (const auto& info : lightInfos)
+    {
+        if (info.lightIndex >= _maxLights) continue;
+
+        // 1. 绑定对应的 FBO
+        glBindFramebuffer(GL_FRAMEBUFFER, _shadowBuffers[info.lightIndex].fbo);
+        glClear(GL_DEPTH_BUFFER_BIT);
+
+        // 2. 准备 6 个方向的矩阵
+        // 投影矩阵：90度 FOV，宽高比 1.0
+        glm::mat4 shadowProj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, info.farPlane);
+        
+        std::vector<glm::mat4> shadowTransforms;
+        shadowTransforms.push_back(shadowProj * glm::lookAt(info.position, info.position + glm::vec3( 1.0,  0.0,  0.0), glm::vec3(0.0, -1.0,  0.0)));
+        shadowTransforms.push_back(shadowProj * glm::lookAt(info.position, info.position + glm::vec3(-1.0,  0.0,  0.0), glm::vec3(0.0, -1.0,  0.0)));
+        shadowTransforms.push_back(shadowProj * glm::lookAt(info.position, info.position + glm::vec3( 0.0,  1.0,  0.0), glm::vec3(0.0,  0.0,  1.0)));
+        shadowTransforms.push_back(shadowProj * glm::lookAt(info.position, info.position + glm::vec3( 0.0, -1.0,  0.0), glm::vec3(0.0,  0.0, -1.0)));
+        shadowTransforms.push_back(shadowProj * glm::lookAt(info.position, info.position + glm::vec3( 0.0,  0.0,  1.0), glm::vec3(0.0, -1.0,  0.0)));
+        shadowTransforms.push_back(shadowProj * glm::lookAt(info.position, info.position + glm::vec3( 0.0,  0.0, -1.0), glm::vec3(0.0, -1.0,  0.0)));
+
+        // 传递给 Shader
+        for (int i = 0; i < 6; ++i) {
+            _shader->setUniformMat4("shadowMatrices[" + std::to_string(i) + "]", shadowTransforms[i]);
+        }
+        _shader->setUniformFloat("farPlane", info.farPlane);
+        _shader->setUniformVec3("lightPos", info.position);
+
+        // 3. 绘制场景
+        // 注意：这里我们简单地画所有物体。为了性能，可以做视锥剔除（但对于全向光源，剔除比较复杂）。
+        for (const auto& go : scene.getGameObjects()) {
+            auto meshComp = go->getComponent<MeshComponent>();
+            if (!meshComp || !meshComp->enabled) continue;
+            if (meshComp->isGizmo) continue; // Gizmo 不投射阴影
+
+            // 这里不需要剔除背面，为了让阴影更准确（尤其是封闭物体），
+            // 有时甚至可以剔除正面(GL_FRONT)来修复彼得潘现象，视具体效果而定。
+            // 这里暂且不做特殊 Cull Face 设置，沿用默认或外部设置。
+            
+            glm::mat4 model = go->transform.getLocalMatrix();
+            if (meshComp->model) {
+                model = model * meshComp->model->transform.getLocalMatrix();
+                _shader->setUniformMat4("model", model);
+                meshComp->model->draw();
+            }
+        }
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+GLuint PointShadowPass::getShadowMap(int index) const {
+    if (index >= 0 && index < _shadowBuffers.size()) {
+        return _shadowBuffers[index].texture;
+    }
+    return 0;
+}
+```
+
+./engine/point_shadow_pass.h:
+```
+#pragma once
+
+#include <glad/gl.h>
+#include <memory>
+#include <vector>
+#include <glm/glm.hpp>
+
+#include "base/glsl_program.h"
+#include "scene.h"
+
+// 用于传递单个点光源的渲染信息
+struct PointShadowInfo {
+    glm::vec3 position;
+    float farPlane; // 点光源的视锥最远距离 (通常设为 25.0f 或更大)
+    int lightIndex; // 对应 pointShadowMaps 数组的第几个槽位
+};
+
+class PointShadowPass
+{
+public:
+    // resolution: Cubemap 的分辨率 (通常 1024)
+    // maxLights: 最大支持的点光源阴影数量 (例如 4)
+    PointShadowPass(int resolution = 1024, int maxLights = 4);
+    ~PointShadowPass();
+
+    // 核心渲染函数
+    void render(const Scene& scene, const std::vector<PointShadowInfo>& lightInfos);
+
+    // 获取某个槽位的 Cubemap ID
+    GLuint getShadowMap(int index) const;
+    
+    // 获取最大支持数量
+    int getMaxLights() const { return _maxLights; }
+
+private:
+    int _resolution;
+    int _maxLights;
+
+    // 每个光源对应一个 FBO 和一个 Cubemap
+    struct ShadowFrameBuffer {
+        GLuint fbo = 0;
+        GLuint texture = 0; // Cubemap
+    };
+    std::vector<ShadowFrameBuffer> _shadowBuffers;
+
+    std::unique_ptr<GLSLProgram> _shader;
+
+    void initResources();
+    void initShader();
+};
+```
+
 ./engine/renderer.cpp:
 ```
 #include "renderer.h"
@@ -4340,10 +4788,12 @@ void Renderer::init() {
         layout(location = 0) in vec3 aPosition;
         layout(location = 1) in vec3 aNormal;
         layout(location = 2) in vec2 aTexCoord;
+        layout(location = 3) in vec3 aTangent;
 
         out vec3 FragPos;
         out vec3 Normal;
         out vec2 TexCoord;
+        out mat3 TBN;
 
         out vec3 LocalPos;
         // 输出视空间深度 (或者直接用 gl_Position.w)
@@ -4357,16 +4807,35 @@ void Renderer::init() {
             vec4 worldPos = model * vec4(aPosition, 1.0);
             FragPos = vec3(worldPos);
             
-            // 使用 Normal Matrix 修正法线 (防止非均匀缩放导致法线错误)
-            Normal = mat3(transpose(inverse(model))) * aNormal;
-            TexCoord = aTexCoord;
+            // 1. 计算 Normal Matrix (法线矩阵)
+            // 它可以处理非均匀缩放，保证法线方向正确
+            mat3 normalMatrix = mat3(transpose(inverse(model)));
 
+            // 2. 计算世界空间法线 (N)
+            vec3 N = normalize(normalMatrix * aNormal);
+            Normal = N; // 将计算好的法线传给 FS (虽然 FS 可能有了 TBN 会重算，但保留它是个好习惯)
+            
+            // 3. 计算世界空间切线 (T)
+            vec3 T = normalize(normalMatrix * aTangent);
+            
+            // 4. Gram-Schmidt 正交化
+            // 这一步非常关键！它剔除 T 中包含的 N 分量，确保 T 绝对垂直于 N。
+            // 这样可以防止因精度问题或模型数据不佳导致的 TBN 变形。
+            T = normalize(T - dot(T, N) * N);
+            
+            // 5. 计算副切线 (Bitangent, B)
+            // 利用叉乘生成第三个轴
+            vec3 B = cross(N, T);
+            
+            // 6. 构建 TBN 矩阵
+            TBN = mat3(T, B, N);
+
+            TexCoord = aTexCoord;
             LocalPos = aPosition;
             
             gl_Position = projection * view * worldPos;
             
-            // 保存 View Space 的深度 (对于透视投影，w 分量就是 -ViewZ)
-            // 用于 CSM 层级选择
+            // 保存 View Space 的深度
             ClipSpaceZ = gl_Position.w;
         }
     )";
@@ -4374,6 +4843,7 @@ void Renderer::init() {
     // 片元着色器 (Fragment Shader) - Blinn-Phong 多光源版本
     const char *fsCode = R"(
         #version 330 core
+        #extension GL_ARB_shader_texture_lod : enable
         out vec4 FragColor;
 
         in vec3 FragPos;
@@ -4381,48 +4851,73 @@ void Renderer::init() {
         in vec2 TexCoord;
         in vec3 LocalPos;
         in float ClipSpaceZ;
+        in mat3 TBN;
 
         // 材质定义
         struct Material {
-            vec3 ambient;
-            vec3 diffuse;
-            vec3 specular;
-            float shininess;
+            vec3 albedo;
+            float metallic;
+            float roughness;
+            float ao;
 
             float reflectivity;
             float refractionIndex;
             float transparency;
-        }; 
+        };
 
+        uniform Material material;
+
+        // 纹理
         uniform sampler2D diffuseMap; 
         uniform bool hasDiffuseMap;
         uniform bool useTriplanar;
         uniform float triplanarScale;
+        uniform vec3 triRotPos; // x,y,z 对应 +X,+Y,+Z 面的角度
+        uniform vec3 triRotNeg; // x,y,z 对应 -X,-Y,-Z 面的角度
+        uniform vec3 triFlipPos;
+        uniform vec3 triFlipNeg;
+        // 法线贴图
+        uniform sampler2D normalMap;
+        uniform bool hasNormalMap;
+        uniform float normalStrength; // 默认 1.0
+        uniform bool flipNormalY;     // 默认 false
 
-        // 动态环境贴图
+        // 动态环境贴图 IBL
         uniform samplerCube envMap;
         uniform bool hasEnvMap;
+        uniform float iblIntensity;
 
-        // 视差校正所需的 Uniforms
+        // 视差校正
         uniform vec3 probePos;    // 探针拍摄时的中心位置 (世界坐标)
         uniform vec3 probeBoxMin; // 房间的最小边界 (世界坐标)
         uniform vec3 probeBoxMax; // 房间的最大边界 (世界坐标)
+
+        // 用于在函数间传递 Triplanar 计算结果
+        struct TriplanarData {
+            vec2 uvX;
+            vec2 uvY;
+            vec2 uvZ;
+            vec3 blend;
+        };
 
         // 平行光定义
         struct DirLight {
             vec3 direction;
             vec3 color;
             float intensity;
+            int shadowIndex; // -1 = 无阴影, >=0 = 纹理数组起始层级
         };
 
         // 点光源定义
         struct PointLight {
             vec3 position;
-            float constant;
-            float linear;
-            float quadratic;
+            float range;
             vec3 color;
             float intensity;
+            int shadowIndex; // -1 = 无阴影, >=0 = 对应 pointShadowMaps 的下标
+            float shadowStrength; // 阴影深浅
+            float shadowRadius;   // 阴影软硬
+            float shadowBias;
         };
 
         // 聚光灯定义
@@ -4431,28 +4926,27 @@ void Renderer::init() {
             vec3 direction;
             float cutOff;
             float outerCutOff;
-            float constant;
-            float linear;
-            float quadratic;
+            float range;
             vec3 color;
             float intensity;
         };
 
         // 定义最大光源数量常量
+        #define NR_DIR_LIGHTS 4
         #define NR_POINT_LIGHTS 4
         #define NR_SPOT_LIGHTS 4
+        
+        // 最大支持的点光源阴影数
+        #define NR_POINT_SHADOWS 4
 
         uniform bool isUnlit;
         uniform bool isDoubleSided;
         uniform bool isDebug;
 
         uniform vec3 viewPos;
-        uniform Material material;
         
-        // 我们允许多个平行光(如多个太阳)
-        #define NR_DIR_LIGHTS 2 
         uniform DirLight dirLights[NR_DIR_LIGHTS];
-        uniform int dirLightCount; // 实际传入的数量
+        uniform int dirLightCount;
 
         uniform PointLight pointLights[NR_POINT_LIGHTS];
         uniform int pointLightCount;
@@ -4460,294 +4954,536 @@ void Renderer::init() {
         uniform SpotLight spotLights[NR_SPOT_LIGHTS];
         uniform int spotLightCount;
 
-        // -----------------------------------------------------------
-        // [新增] CSM 阴影相关 Uniforms
-        // -----------------------------------------------------------
-        // 纹理数组采样器 (Array + Shadow 比较)
+        // CSM (平行光) 阴影
         uniform sampler2DArrayShadow shadowMap; 
-        
-        // 级联矩阵数组 (建议使用 UBO，这里为了简单用 Uniform 数组)
-        // 布局必须匹配 C++ 传递方式
-        uniform mat4 lightSpaceMatrices[16]; 
-        
+        // 假设最大 4 个灯 * 6 层级联 = 24 个矩阵
+        // 为安全起见定义 32
+        uniform mat4 lightSpaceMatrices[32];
         uniform float cascadePlaneDistances[16];
-        uniform int cascadeCount;   
+        uniform int cascadeCount;
         uniform float shadowBias;
+
+        // 点光源阴影
+        uniform samplerCube pointShadowMaps[NR_POINT_SHADOWS];
+        uniform float pointShadowFarPlanes[NR_POINT_SHADOWS];
+
+        const float PI = 3.14159265359;
+
+        // 1. 法线分布函数 (NDF) - GGX Trowbridge-Reitz
+        // 决定了高光的大小和形状 (Roughness 越小，光斑越集中)
+        float DistributionGGX(vec3 N, vec3 H, float roughness)
+        {
+            float a = roughness * roughness;
+            float a2 = a * a;
+            float NdotH = max(dot(N, H), 0.0);
+            float NdotH2 = NdotH * NdotH;
+
+            float nom   = a2;
+            float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+            denom = PI * denom * denom;
+
+            return nom / max(denom, 0.0000001); // 防止除零
+        }
+
+        // 2. 几何遮蔽函数 (Geometry) - Schlick-GGX
+        // 模拟粗糙表面的微观自遮挡 (Roughness 越大，越暗)
+        float GeometrySchlickGGX(float NdotV, float roughness)
+        {
+            // 对于直接光照，k 取值如下：
+            float r = (roughness + 1.0);
+            float k = (r*r) / 8.0;
+
+            float nom   = NdotV;
+            float denom = NdotV * (1.0 - k) + k;
+
+            return nom / max(denom, 0.0000001);
+        }
+
+        float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness)
+        {
+            float NdotV = max(dot(N, V), 0.0);
+            float NdotL = max(dot(N, L), 0.0);
+            float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+            float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+
+            return ggx1 * ggx2;
+        }
+
+        // 3. 菲涅尔方程 (Fresnel) - Schlick 近似
+        // 决定了反射光和折射光(漫反射)的比例
+        // F0: 基础反射率 (非金属0.04, 金属为 albedo)
+        vec3 FresnelSchlick(float cosTheta, vec3 F0)
+        {
+            return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+        }
+
+        // 4. 针对 IBL 的菲涅尔函数 (加入粗糙度影响)
+        // 越粗糙的表面，边缘的菲涅尔反射越弱
+        vec3 FresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness)
+        {
+            return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+        }
+        
+        // 5. 统一的 PBR 计算核心
+        // 输入：光方向L, 视线V, 法线N, 光照强度Radiance, 材质F0, 材质属性
+        vec3 CalculatePBR_Lo(vec3 L, vec3 V, vec3 N, vec3 radiance, vec3 F0, vec3 albedo, float roughness, float metallic)
+        {
+            vec3 H = normalize(V + L); // 半程向量
+
+            // Cook-Torrance BRDF
+            float NDF = DistributionGGX(N, H, roughness);   
+            float G   = GeometrySmith(N, V, L, roughness);      
+            vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
+           
+            vec3 numerator    = NDF * G * F; 
+            float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001; // +0.0001 防止除零
+            vec3 specular = numerator / denominator;
+            
+            // kS 是菲涅尔反射部分 (即 F)
+            vec3 kS = F;
+            // kD 是剩下的漫反射部分 (能量守恒: 入射光 - 反射光)
+            vec3 kD = vec3(1.0) - kS;
+            // 金属没有漫反射 (被自由电子吸收)，所以乘以 (1 - metallic)
+            kD *= 1.0 - metallic;	  
+
+            // 最终出射光 Lo = (漫反射 + 镜面反射) * 辐射率 * cosTheta
+            float NdotL = max(dot(N, L), 0.0);
+            
+            return (kD * albedo / PI + specular) * radiance * NdotL;
+        }
+
+        // 6. 环境光 BRDF 近似计算 (替代 BRDF LUT 贴图)
+        // 这是 Karis (Epic Games) 提出的拟合公式，极其经典
+        vec3 EnvBRDFApprox(vec3 specularColor, float roughness, float NdotV)
+        {
+            const vec4 c0 = vec4(-1, -0.0275, -0.572, 0.022);
+            const vec4 c1 = vec4(1, 0.0425, 1.04, -0.04);
+            vec4 r = roughness * c0 + c1;
+            float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+            vec2 AB = vec2(-1.04, 1.04) * a004 + r.zw;
+            return specularColor * AB.x + AB.y;
+        }
 
         // 函数声明
         vec4 getTriplanarSample(vec3 worldPos, vec3 normal);
 
-        vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir, vec3 albedo);
-        vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 albedo);
-        vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 albedo);
+        void CalcDirLight(DirLight light, vec3 N, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum);
+        void CalcPointLight(PointLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum);
+        void CalcSpotLight(SpotLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, inout vec3 diffAccum, inout vec3 specAccum);
 
         vec3 BoxProjectedCubemapDirection(vec3 worldPos, vec3 worldRefDir, vec3 pPos, vec3 boxMin, vec3 boxMax);
 
-        float ShadowCalculation(vec3 fragPosWorld, vec3 normal, vec3 lightDir, float viewSpaceDepth);
+        float ShadowCalculation(vec3 fragPosWorld, vec3 normal, vec3 lightDir, float viewSpaceDepth, int baseLayerIndex);
+        float CalcPointShadow(vec3 fragPos, vec3 lightPos, int shadowIndex, float range, float radius, float bias);
+
+        float GetAttenuation(float distance, float range);
+
+        TriplanarData CalcTriplanarData(vec3 position, vec3 normal);
+        vec4 SampleTriplanar(sampler2D theMap, TriplanarData data);
+        vec3 SampleTriplanarNormal(sampler2D normMap, TriplanarData data, vec3 worldNormal);
 
 		// 获取法线辅助函数
 		vec3 getNormal() {
-            // 归一化插值后的法线
             vec3 n = normalize(Normal);
-            // 只有当物体明确开启了双面渲染(isDoubleSided == true)，
-            // 并且我们正在渲染背面(!gl_FrontFacing)时，才反转法线。
-            // 对于普通的球体/立方体，这段逻辑将被跳过，从而避免了 macOS 上的误判问题。
-            if (isDoubleSided && !gl_FrontFacing) {
-                n = -n; 
-            }
+            if (isDoubleSided && !gl_FrontFacing) n = -n; 
             return n;
+        }
+
+        // ACES Tone Mapping
+        vec3 ACESFilm(vec3 x) {
+            float a = 2.51f;
+            float b = 0.03f;
+            float c = 2.43f;
+            float d = 0.59f;
+            float e = 0.14f;
+            return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
         }
         
         void main() {
             vec3 norm = getNormal();
-            vec3 baseDiffuse = material.diffuse;
 
-            // 1. 基础纹理采样
+            TriplanarData triData;
+            if (useTriplanar) {
+                // 使用 LocalPos 保证纹理随物体移动
+                triData = CalcTriplanarData(LocalPos, norm); 
+            }
+
+            vec3 albedoColor = material.albedo;
+
+            // 基础纹理采样
             if (hasDiffuseMap) {
                 vec4 texColor;
-                // 根据开关选择采样方式
                 if (useTriplanar) {
-                    texColor = getTriplanarSample(LocalPos, norm);
+                    texColor = SampleTriplanar(diffuseMap, triData);
                 } else {
                     texColor = texture(diffuseMap, TexCoord);
                 }
-                baseDiffuse = texColor.rgb * material.diffuse; 
+                // sRGB 矫正
+                texColor.rgb = pow(texColor.rgb, vec3(2.2)); 
+                albedoColor = texColor.rgb * material.albedo;
+            }
+
+            if (hasNormalMap) {
+                if (useTriplanar) {
+                    // 使用专门的 Triplanar 法线混合函数
+                    // 注意：这里传入的是几何法线 Normal (大写的)，不是 TBN 计算出的
+                    norm = SampleTriplanarNormal(normalMap, triData, normalize(Normal));
+                } else {
+                    // 标准 UV 法线 (使用 getNormal 里的逻辑，可以直接把代码搬过来或保持原样)
+                    // ... 之前的 TBN 逻辑 ...
+                    vec3 rawNormal = texture(normalMap, TexCoord).rgb;
+                    if (flipNormalY) rawNormal.g = 1.0 - rawNormal.g;
+                    vec3 tangentNormal = rawNormal * 2.0 - 1.0;
+                    tangentNormal.xy *= normalStrength;
+                    norm = normalize(TBN * normalize(tangentNormal));
+                    if (isDoubleSided && !gl_FrontFacing) norm = -norm; 
+                }
+            } else {
+                // 如果没有贴图，确保 norm 已经处理了双面渲染
+                if (isDoubleSided && !gl_FrontFacing) norm = -norm; 
             }
 
             // Unlit 模式直接返回
             if (isUnlit) {
-                FragColor = vec4(baseDiffuse, 1.0); 
+                FragColor = vec4(albedoColor, 1.0); 
                 return;
             }
             
             vec3 viewDir = normalize(viewPos - FragPos);
 
-            // 计算阴影
-            // 假设 dirLights[0] 是产生阴影的主光源 (太阳)
-            float shadow = 1.0;
-            if (dirLightCount > 0) {
-                vec3 lightDir = normalize(-dirLights[0].direction);
-                // 传入 ClipSpaceZ 用于级联选择
-                shadow = ShadowCalculation(FragPos, norm, lightDir, ClipSpaceZ);
-            }
-            
-            // 2. 计算标准 Phong 光照
-            // 先计算全局基础环境光
-            // 我们可以取一个固定的环境光颜色，或者取第一个平行光的颜色作为环境基调
-            // 这里为了简单，我们假设环境光是白色的微弱光 (0.05 强度) * 材质的环境光系数
-            vec3 ambient = vec3(0.05) * material.ambient;
-            
-            // 如果有平行光，我们可以用第一个平行光的颜色来影响环境光，稍微自然一点（可选）
-            if (dirLightCount > 0) {
-                ambient = dirLights[0].color * 0.1 * material.ambient; 
-            }
+            // ================= PBR 参数准备 =================
+            // F0: 基础反射率 (0度角的反射率)
+            // 绝缘体(非金属) F0 约为 0.04
+            // 导体(金属) F0 为自身的 albedo 颜色
+            vec3 F0 = vec3(0.04); 
+            F0 = mix(F0, albedoColor, material.metallic);
+            // ==============================================
 
-            // 初始化 result 为环境光
-            vec3 result = ambient;
+            // 分离 Diffuse 和 Specular 累加器
+            vec3 directDiffuse = vec3(0.0);
+            vec3 directSpecular = vec3(0.0);
 
+            // 1. 计算所有直接光照
             for(int i = 0; i < dirLightCount; i++) {
-                // 只有第一个平行光投射阴影
-                float s = (i == 0) ? shadow : 1.0; 
-                result += CalcDirLight(dirLights[i], norm, viewDir, baseDiffuse) * s; 
+                float shadow = 1.0;
+                if (dirLights[i].shadowIndex >= 0) {
+                    vec3 lightDir = normalize(-dirLights[i].direction);
+                    shadow = ShadowCalculation(FragPos, norm, lightDir, ClipSpaceZ, dirLights[i].shadowIndex);
+                }
+                CalcDirLight(dirLights[i], norm, viewDir, albedoColor, F0, shadow, directDiffuse, directSpecular);
             }
             
-            for(int i = 0; i < pointLightCount; i++)
-                result += CalcPointLight(pointLights[i], norm, FragPos, viewDir, baseDiffuse);
-                
+            for(int i = 0; i < pointLightCount; i++) {
+                float shadow = 1.0;
+                if (pointLights[i].shadowIndex >= 0) {
+                    float rawShadow = CalcPointShadow(FragPos, pointLights[i].position, pointLights[i].shadowIndex, pointLights[i].range, pointLights[i].shadowRadius, pointLights[i].shadowBias);
+                    shadow = mix(1.0, rawShadow, pointLights[i].shadowStrength);
+                }
+                CalcPointLight(pointLights[i], norm, FragPos, viewDir, albedoColor, F0, shadow, directDiffuse, directSpecular);
+            }
+            
             for(int i = 0; i < spotLightCount; i++)
-                result += CalcSpotLight(spotLights[i], norm, FragPos, viewDir, baseDiffuse);
-
-            // 3. 环境反射与折射
+                CalcSpotLight(spotLights[i], norm, FragPos, viewDir, albedoColor, F0, directDiffuse, directSpecular);
+            
+            // 2. 环境光 (IBL)
+            vec3 ambientDiffuse = vec3(0.0);
+            vec3 ambientSpecular = vec3(0.0);
+            
             if (hasEnvMap) {
-                vec3 I = normalize(FragPos - viewPos); // 视线向量 I
-                vec3 N = norm;                         // 法线 N
-
-                // ------------------------------------------
-                // 1. 计算菲涅尔系数 (Fresnel)
-                // ------------------------------------------
-                // 描述：视线与法线越垂直(边缘)，反射越强(F接近1)；越平行(中心)，折射越强(F接近0)
-                // F0 是基础反射率：
-                //   - 水/玻璃等非金属 (Dielectric) 约为 0.04
-                //   - 金属 (Metal) 约为 material.diffuse 颜色本身
-                // 我们用 reflectivity 参数来控制这个 F0
-                float F0_val = mix(0.04, 1.0, material.reflectivity);
-                vec3 F0 = vec3(F0_val);
+                // Diffuse IBL
+                vec3 irradiance = textureLod(envMap, norm, 8.0).rgb; 
+                vec3 kS = FresnelSchlickRoughness(max(dot(norm, viewDir), 0.0), F0, material.roughness);
+                vec3 kD = 1.0 - kS;
+                kD *= 1.0 - material.metallic;
                 
-                // Schlick 近似公式
-                float cosTheta = clamp(dot(N, -I), 0.0, 1.0);
-                vec3 F = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+                ambientDiffuse = kD * irradiance * albedoColor * iblIntensity;
 
-                // ------------------------------------------
-                // 2. 计算反射 (Reflection)
-                // ------------------------------------------
-                vec3 reflectColor = vec3(0.0);
-                {
-                    vec3 R = reflect(I, N);
-                    // 应用视差校正
-                    vec3 correctedR = BoxProjectedCubemapDirection(FragPos, R, probePos, probeBoxMin, probeBoxMax);
-                    reflectColor = texture(envMap, correctedR).rgb;
-                }
+                // Specular IBL
+                vec3 R = reflect(-viewDir, norm);
+                vec3 correctedR = BoxProjectedCubemapDirection(FragPos, R, probePos, probeBoxMin, probeBoxMax);
+                float MAX_LOD = 4.0;
+                vec3 prefilteredColor = textureLod(envMap, correctedR, material.roughness * MAX_LOD).rgb;
+                vec3 specularFactor = EnvBRDFApprox(F0, material.roughness, max(dot(norm, viewDir), 0.0));
+                
+                ambientSpecular = prefilteredColor * specularFactor * iblIntensity;
+            } else {
+                ambientDiffuse = vec3(0.03) * albedoColor * material.ao; 
+            }
+            
+            // 3. 组合 PBR 不透明部分
+            vec3 opaqueColor = (ambientDiffuse + directDiffuse) * material.ao + (ambientSpecular + directSpecular);
+            
+            // 4. 玻璃/折射逻辑 (关键修改)
+            vec3 finalColor = opaqueColor;
 
-                // ------------------------------------------
-                // 3. 计算折射 + 色散 (Refraction + Dispersion)
-                // ------------------------------------------
+            if (material.transparency > 0.001) 
+            {
+                // 计算玻璃的 Fresnel (使用用户指定的 Reflectivity 微调 F0)
+                float glassF0 = mix(0.0, 0.5, material.reflectivity); // 注意：这里范围改小了
+                // 或者更物理一点，假设玻璃 F0 固定 0.04，Reflectivity 只控制额外增强
+                vec3 F0_Glass = vec3(0.04); 
+                
+                float cosTheta = clamp(dot(norm, -normalize(FragPos - viewPos)), 0.0, 1.0);
+                vec3 F = FresnelSchlick(cosTheta, F0_Glass);
+                
+                // 用户 reflectivity 额外增强 Fresnel 效果 (艺术控制)
+                F += material.reflectivity * 0.5;
+                F = clamp(F, 0.0, 1.0);
+
+                // 折射与反射
                 vec3 refractColor = vec3(0.0);
-                if (material.transparency > 0.01) {
-                    // 基础折射率比
-                    float k = (material.refractionIndex < 1.0) ? 1.0 : material.refractionIndex;
-                    float ratio = 1.00 / k;
-                    
-                    // [色散核心]：为 R, G, B 通道使用微小差异的折射率
-                    // 0.01 ~ 0.02 的偏移量通常能产生很好的钻石/厚玻璃效果
-                    float dispersion = 0.02; 
-                    
-                    vec3 R_r = refract(I, N, ratio * (1.0 - dispersion)); // 红光折射少
-                    vec3 R_g = refract(I, N, ratio);                      // 绿光居中
-                    vec3 R_b = refract(I, N, ratio * (1.0 + dispersion)); // 蓝光折射多
+                vec3 reflectColor = vec3(0.0);
 
-                    // 分别对 R, G, B 进行视差校正采样
-                    vec3 correctedR_r = BoxProjectedCubemapDirection(FragPos, R_r, probePos, probeBoxMin, probeBoxMax);
-                    vec3 correctedR_g = BoxProjectedCubemapDirection(FragPos, R_g, probePos, probeBoxMin, probeBoxMax);
-                    vec3 correctedR_b = BoxProjectedCubemapDirection(FragPos, R_b, probePos, probeBoxMin, probeBoxMax);
-
-                    // 分别采样并组合
-                    float r = texture(envMap, correctedR_r).r;
-                    float g = texture(envMap, correctedR_g).g;
-                    float b = texture(envMap, correctedR_b).b;
+                if (hasEnvMap) {
+                    // Refract
+                    float k = max(material.refractionIndex, 1.0);
+                    float ratio = 1.0 / k;
+                    vec3 I = normalize(FragPos - viewPos);
                     
-                    refractColor = vec3(r, g, b);
+                    // 简化折射采样 (不做色散了，为了性能和清晰度)
+                    vec3 R_refract = refract(I, norm, ratio);
+                    vec3 corrR_refract = BoxProjectedCubemapDirection(FragPos, R_refract, probePos, probeBoxMin, probeBoxMax);
+                    refractColor = textureLod(envMap, corrR_refract, 0.0).rgb * iblIntensity;
+
+                    // Reflect
+                    vec3 R_reflect = reflect(I, norm);
+                    vec3 corrR_reflect = BoxProjectedCubemapDirection(FragPos, R_reflect, probePos, probeBoxMin, probeBoxMax);
+                    reflectColor = textureLod(envMap, corrR_reflect, material.roughness * 4.0).rgb * iblIntensity;
                 }
 
-                // ------------------------------------------
-                // 4. 最终物理混合 (Mix based on Fresnel)
-                // ------------------------------------------
-                // 如果物体是透明的 (transparency > 0)
-                // 最终颜色 = 反射 * F + 折射 * (1 - F)
-                // 这种混合方式保证了能量守恒：光线要么反射走，要么折射进去
+                vec3 glassBody = mix(refractColor, reflectColor, F);
                 
-                vec3 glassColor = mix(refractColor, reflectColor, F);
+                // [关键] 混合: 玻璃本体 + 直接光高光 (Sun Specular)
+                // 即使玻璃是透明的，太阳照上去也应该有亮斑 (directSpecular)
+                // 而 diffuse 部分被 transparency 替换掉了
                 
-                // 最后，我们要把这个“玻璃计算结果”和物体原本的颜色(Phong光照)混合
-                // 如果 transparency = 1.0 (全透明)，我们只显示 glassColor
-                // 如果 transparency = 0.0 (不透明)，我们主要显示 result (Phong光照) + 表面反射
-                
-                if (material.transparency > 0.01) {
-                    // 全透明模式：忽略漫反射本身，只保留高光
-                    // (玻璃本身几乎没有漫反射，只有镜面反射和折射)
-                    // 我们保留一点 result 里的 specular 高光
-                    result = glassColor + (result * 0.1); // 这里的 0.1 是为了防止全黑，保留一点环境光感
-                } else {
-                    // 不透明模式 (金属)：简单的反射叠加
-                    // 金属也是由 Fresnel 控制的
-                    result = mix(result, reflectColor, material.reflectivity * F); 
-                }
+                vec3 glassResult = glassBody + directSpecular;
+
+                finalColor = mix(opaqueColor, glassResult, material.transparency);
             }
 
-            FragColor = vec4(result, 1.0);
+            // 5. Tone Mapping (ACES)
+            finalColor = ACESFilm(finalColor);
+            
+            // 6. Gamma
+            finalColor = pow(finalColor, vec3(1.0/2.2));
 
+            FragColor = vec4(finalColor, 1.0);
+
+            // Debug Cascade Layers (仅显示第一个开启阴影的光源的层级)
             if (isDebug) {
-                if (gl_FrontFacing) {
-                    FragColor = vec4(1.0, 0.4, 0.4, 1.0); // 红
-                } else {
-                    FragColor = vec4(0.4, 1.0, 0.4, 1.0); // 绿
+                int layer = -1;
+                for (int i = 0; i < cascadeCount; ++i) {
+                    if (ClipSpaceZ < cascadePlaneDistances[i]) {
+                        layer = i;
+                        break;
+                    }
                 }
+                if (layer == -1) layer = cascadeCount;
+                vec3 debugColor = vec3(0.0);
+                if (layer == 0) debugColor = vec3(1.0, 0.0, 0.0);
+                else if (layer == 1) debugColor = vec3(0.0, 1.0, 0.0);
+                else if (layer == 2) debugColor = vec3(0.0, 0.0, 1.0);
+                else if (layer == 3) debugColor = vec3(1.0, 1.0, 0.0);
+                else debugColor = vec3(1.0, 0.0, 1.0);
+                FragColor = vec4(mix(FragColor.rgb, debugColor, 0.2), 1.0);
             }
-
-            int layer = -1;
-    for (int i = 0; i < cascadeCount; ++i) {
-        if (ClipSpaceZ < cascadePlaneDistances[i]) {
-            layer = i;
-            break;
         }
-    }
-    if (layer == -1) layer = cascadeCount;
 
-    vec3 debugColor = vec3(0.0);
-    if (layer == 0) debugColor = vec3(1.0, 0.0, 0.0); // 红: 近处 (0-10m)
-    else if (layer == 1) debugColor = vec3(0.0, 1.0, 0.0); // 绿: 中近 (10-60m)
-    else if (layer == 2) debugColor = vec3(0.0, 0.0, 1.0); // 蓝: 中远 (50-250m)
-    else if (layer == 3) debugColor = vec3(1.0, 1.0, 0.0); // 黄: 最远 (250m - zFar)
-    else debugColor = vec3(1.0, 0.0, 1.0); // 紫: 错误/超出范围
+        vec2 rotateUV(vec2 uv, float angleDeg) {
+            vec2 center = vec2(0.5);
+            uv -= center;
+            float rad = radians(angleDeg);
+            float s = sin(rad);
+            float c = cos(rad);
+            mat2 rotMat = mat2(c, -s, s, c);
+            uv = rotMat * uv;
+            uv += center;
+            return uv;
+        }
 
-    // 将调试颜色以 20% 的强度混合到最终结果中
-    FragColor = vec4(mix(FragColor.rgb, debugColor, 0.2), 1.0);
+        TriplanarData CalcTriplanarData(vec3 position, vec3 normal) {
+            TriplanarData data;
+            
+            // 1. 权重
+            vec3 blending = abs(normal);
+            blending = pow(blending, vec3(4.0)); 
+            float b = (blending.x + blending.y + blending.z);
+            data.blend = blending / vec3(b, b, b);
+
+            // 2. 基础投影
+            data.uvX = position.zy * triplanarScale + 0.5;
+            data.uvY = position.xz * triplanarScale + 0.5;
+            data.uvZ = position.xy * triplanarScale + 0.5;
+
+            // 3. 旋转 (基于轴向)
+            // X轴
+            bool isPosX = normal.x > 0.0;
+            float rotX = isPosX ? triRotPos.x : triRotNeg.x;
+            if (rotX > 0.1) data.uvX = rotateUV(data.uvX, rotX);
+            
+            // Y轴
+            bool isPosY = normal.y > 0.0;
+            float rotY = isPosY ? triRotPos.y : triRotNeg.y;
+            if (rotY > 0.1) data.uvY = rotateUV(data.uvY, rotY);
+
+            // Z轴
+            bool isPosZ = normal.z > 0.0;
+            float rotZ = isPosZ ? triRotPos.z : triRotNeg.z;
+            if (rotZ > 0.1) data.uvZ = rotateUV(data.uvZ, rotZ);
+
+            // 4. 翻转 (基于轴向)
+            bool flipX = isPosX ? (triFlipPos.x > 0.5) : (triFlipNeg.x > 0.5);
+            if (flipX) data.uvX.x = -data.uvX.x;
+
+            bool flipY = isPosY ? (triFlipPos.y > 0.5) : (triFlipNeg.y > 0.5);
+            if (flipY) data.uvY.x = -data.uvY.x;
+
+            bool flipZ = isPosZ ? (triFlipPos.z > 0.5) : (triFlipNeg.z > 0.5);
+            if (flipZ) data.uvZ.x = -data.uvZ.x;
+
+            return data;
         }
 
         // --- 函数实现 ---
 
-        vec4 getTriplanarSample(vec3 position, vec3 normal) {
-            // 1. 计算混合权重
-            // 使用幂函数 (pow) 增加对比度，让主轴方向的纹理更清晰，侧面的纹理快速衰减
-            // 这里的 4.0 是“锐度”，数值越大，交界处越硬；数值越小，交界处越模糊
-            vec3 blending = abs(normal);
-            blending = pow(blending, vec3(4.0)); 
+        vec4 SampleTriplanar(sampler2D theMap, TriplanarData data) {
+            vec4 colX = texture(theMap, data.uvX);
+            vec4 colY = texture(theMap, data.uvY);
+            vec4 colZ = texture(theMap, data.uvZ);
+            return colX * data.blend.x + colY * data.blend.y + colZ * data.blend.z;
+        }
+
+        vec3 SampleTriplanarNormal(sampler2D normMap, TriplanarData data, vec3 worldNormal) {
+            // 1. 采样
+            vec3 nX = texture(normMap, data.uvX).xyz;
+            vec3 nY = texture(normMap, data.uvY).xyz;
+            vec3 nZ = texture(normMap, data.uvZ).xyz;
+
+            // 2. 解包 (0~1 -> -1~1) 并处理翻转
+            if (flipNormalY) {
+                nX.g = 1.0 - nX.g; nY.g = 1.0 - nY.g; nZ.g = 1.0 - nZ.g;
+            }
+            nX = nX * 2.0 - 1.0;
+            nY = nY * 2.0 - 1.0;
+            nZ = nZ * 2.0 - 1.0;
+
+            // 应用强度
+            nX.xy *= normalStrength; nY.xy *= normalStrength; nZ.xy *= normalStrength;
+            // 重新归一化是必要的，因为修改强度后长度变了
+            nX = normalize(nX); nY = normalize(nY); nZ = normalize(nZ);
+
+            // 3. 转换到世界空间 (修正部分)
+            // 这里的逻辑是：
+            // 切线空间的 Z (n.z) 对应 世界空间的 几何法线方向 (X, Y 或 Z)
+            // 切线空间的 X (n.x) 对应 切线 (Tangent)
+            // 切线空间的 Y (n.y) 对应 副切线 (Bitangent)
             
-            // 归一化权重，确保加起来等于 1
-            float b = (blending.x + blending.y + blending.z);
-            blending /= vec3(b, b, b);
+            // X面投影 (ZY平面 UV): U->Z(Tangent), V->Y(Bitangent), Face->X
+            // 修正：将 nX.z 放入 X 分量
+            vec3 worldNormalX = vec3(nX.z, nX.y, nX.x); 
 
-            // 2. [核心修改] 使用传入的 position (将是 LocalPos) 计算 UV
-            vec2 uvX = position.zy * triplanarScale;
-            vec2 uvY = position.xz * triplanarScale;
-            vec2 uvZ = position.xy * triplanarScale;
+            // Y面投影 (XZ平面 UV): U->X(Tangent), V->Z(Bitangent), Face->Y
+            // 修正：将 nY.z 放入 Y 分量
+            vec3 worldNormalY = vec3(nY.x, nY.z, nY.y); 
 
-            // 3. 采样三次
-            vec4 colX = texture(diffuseMap, uvX);
-            vec4 colY = texture(diffuseMap, uvY);
-            vec4 colZ = texture(diffuseMap, uvZ);
+            // Z面投影 (XY平面 UV): U->X(Tangent), V->Y(Bitangent), Face->Z
+            // 修正：将 nZ.z 放入 Z 分量
+            vec3 worldNormalZ = vec3(nZ.x, nZ.y, nZ.z);
 
-            // 4. 混合结果
-            return colX * blending.x + colY * blending.y + colZ * blending.z;
+            // 4. 处理背面翻转
+            // 如果几何法线指向负方向，我们需要翻转重构出的法线的主轴分量
+            // 这样才能保证法线贴图的 Z 依然指向“表面外侧”
+            if (worldNormal.x < 0.0) worldNormalX.x = -worldNormalX.x;
+            if (worldNormal.y < 0.0) worldNormalY.y = -worldNormalY.y;
+            if (worldNormal.z < 0.0) worldNormalZ.z = -worldNormalZ.z;
+
+            // 5. 混合
+            vec3 blendedNormal = worldNormalX * data.blend.x + 
+                                worldNormalY * data.blend.y + 
+                                worldNormalZ * data.blend.z;
+            
+            return normalize(blendedNormal);
         }
 
-        vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir, vec3 albedo) {
-            vec3 lightDir = normalize(-light.direction);
-            // 漫反射
-            float diff = max(dot(normal, lightDir), 0.0);
-            // 镜面反射 (Blinn-Phong)
-            vec3 halfwayDir = normalize(lightDir + viewDir);
-            float spec = pow(max(dot(normal, halfwayDir), 0.0), material.shininess);
-            // 合并
-            vec3 diffuse = light.color * light.intensity * diff * albedo;
-            vec3 specular = light.color * light.intensity * spec * material.specular;
-            return (diffuse + specular);
+        void CalcDirLight(DirLight light, vec3 N, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum) {
+            vec3 L = normalize(-light.direction);
+            vec3 H = normalize(V + L);
+            float NdotL = max(dot(N, L), 0.0);
+            
+            // Radiance
+            vec3 radiance = light.color * light.intensity * shadow;
+
+            // Cook-Torrance
+            float NDF = DistributionGGX(N, H, material.roughness);   
+            float G   = GeometrySmith(N, V, L, material.roughness);      
+            vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
+           
+            vec3 numerator    = NDF * G * F; 
+            float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
+            vec3 specular = numerator / denominator;
+            
+            vec3 kS = F;
+            vec3 kD = vec3(1.0) - kS;
+            kD *= 1.0 - material.metallic;	  
+
+            // 累加
+            diffAccum += (kD * albedo / PI) * radiance * NdotL;
+            specAccum += specular * radiance * NdotL;
         }
 
-        vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 albedo) {
-            vec3 lightDir = normalize(light.position - fragPos);
-            // 衰减
-            float distance = length(light.position - fragPos);
-            float attenuation = 1.0 / (light.constant + light.linear * distance + light.quadratic * (distance * distance));    
-            // 漫反射
-            float diff = max(dot(normal, lightDir), 0.0);
-            // 镜面反射
-            vec3 halfwayDir = normalize(lightDir + viewDir);
-            float spec = pow(max(dot(normal, halfwayDir), 0.0), material.shininess);
-            // 合并
-            vec3 diffuse = light.color * light.intensity * diff * attenuation * albedo;
-            vec3 specular = light.color * light.intensity * spec * material.specular * attenuation;
-            return (diffuse + specular);
+        void CalcPointLight(PointLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum) {
+            vec3 L = normalize(light.position - pos);
+            vec3 H = normalize(V + L);
+            float distance = length(light.position - pos);
+            float attenuation = GetAttenuation(distance, light.range);
+            float NdotL = max(dot(N, L), 0.0);
+
+            vec3 radiance = light.color * light.intensity * attenuation * shadow;
+
+            float NDF = DistributionGGX(N, H, material.roughness);   
+            float G   = GeometrySmith(N, V, L, material.roughness);      
+            vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
+           
+            vec3 numerator    = NDF * G * F; 
+            float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
+            vec3 specular = numerator / denominator;
+            
+            vec3 kS = F;
+            vec3 kD = vec3(1.0) - kS;
+            kD *= 1.0 - material.metallic;	  
+
+            diffAccum += (kD * albedo / PI) * radiance * NdotL;
+            specAccum += specular * radiance * NdotL;
         }
 
-        vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 albedo) {
-            vec3 lightDir = normalize(light.position - fragPos);
-            // 衰减
-            float distance = length(light.position - fragPos);
-            float attenuation = 1.0 / (light.constant + light.linear * distance + light.quadratic * (distance * distance));    
-            // 聚光强度 (Soft edges)
-            float theta = dot(lightDir, normalize(-light.direction)); 
+        void CalcSpotLight(SpotLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, inout vec3 diffAccum, inout vec3 specAccum) {
+            vec3 L = normalize(light.position - pos);
+            vec3 H = normalize(V + L);
+            float distance = length(light.position - pos);
+            float attenuation = GetAttenuation(distance, light.range);
+            float NdotL = max(dot(N, L), 0.0);
+
+            float theta = dot(L, normalize(-light.direction)); 
             float epsilon = light.cutOff - light.outerCutOff;
             float intensity = clamp((theta - light.outerCutOff) / epsilon, 0.0, 1.0);
+
+            vec3 radiance = light.color * light.intensity * attenuation * intensity;
+
+            float NDF = DistributionGGX(N, H, material.roughness);   
+            float G   = GeometrySmith(N, V, L, material.roughness);      
+            vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
+           
+            vec3 numerator    = NDF * G * F; 
+            float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
+            vec3 specular = numerator / denominator;
             
-            // 漫反射
-            float diff = max(dot(normal, lightDir), 0.0);
-            // 镜面反射
-            vec3 halfwayDir = normalize(lightDir + viewDir);
-            float spec = pow(max(dot(normal, halfwayDir), 0.0), material.shininess);
-            // 合并
-            vec3 diffuse = light.color * light.intensity * diff * attenuation * intensity * albedo;
-            vec3 specular = light.color * light.intensity * spec * material.specular * attenuation * intensity;
-            return (diffuse + specular);
+            vec3 kS = F;
+            vec3 kD = vec3(1.0) - kS;
+            kD *= 1.0 - material.metallic;	  
+
+            diffAccum += (kD * albedo / PI) * radiance * NdotL;
+            specAccum += specular * radiance * NdotL;
         }
 
         // Box Projection
@@ -4776,35 +5512,23 @@ void Renderer::init() {
             return posonbox - pPos;
         }
 
+        // CSM (平行光) 辅助变量
         vec2 poissonDisk[16] = vec2[]( 
-            vec2( -0.94201624, -0.39906216 ),
-            vec2( 0.94558609, -0.76890725 ),
-            vec2( -0.094184101, -0.92938870 ),
-            vec2( 0.34495938, 0.29387760 ),
-            vec2( -0.91588581, 0.45771432 ),
-            vec2( -0.81544232, -0.87912464 ),
-            vec2( -0.38277543, 0.27676845 ),
-            vec2( 0.97484398, 0.75648379 ),
-            vec2( 0.44323325, -0.97511554 ),
-            vec2( 0.53742981, -0.47373420 ),
-            vec2( -0.26496911, -0.41893023 ),
-            vec2( 0.79197514, 0.19090188 ),
-            vec2( -0.24188840, 0.99706507 ),
-            vec2( -0.81409955, 0.91437590 ),
-            vec2( 0.19984126, 0.78641367 ),
-            vec2( 0.14383161, -0.14100790 )
+            vec2( -0.94201624, -0.39906216 ), vec2( 0.94558609, -0.76890725 ), vec2( -0.094184101, -0.92938870 ), vec2( 0.34495938, 0.29387760 ),
+            vec2( -0.91588581, 0.45771432 ), vec2( -0.81544232, -0.87912464 ), vec2( -0.38277543, 0.27676845 ), vec2( 0.97484398, 0.75648379 ),
+            vec2( 0.44323325, -0.97511554 ), vec2( 0.53742981, -0.47373420 ), vec2( -0.26496911, -0.41893023 ), vec2( 0.79197514, 0.19090188 ),
+            vec2( -0.24188840, 0.99706507 ), vec2( -0.81409955, 0.91437590 ), vec2( 0.19984126, 0.78641367 ), vec2( 0.14383161, -0.14100790 )
         );
 
-        // 随机函数 (生成伪随机噪声)
         float random(vec3 seed, int i){
             vec4 seed4 = vec4(seed, i);
             float dot_product = dot(seed4, vec4(12.9898,78.233,45.164,94.673));
             return fract(sin(dot_product) * 43758.5453);
         }
 
-        // 阴影计算函数 (PCF + Bias)
+        // 平行光阴影计算函数 (PCF + Bias)
         // 返回 0.0 (全阴影) 到 1.0 (无阴影)
-        float ShadowCalculation(vec3 fragPosWorld, vec3 normal, vec3 lightDir, float viewSpaceDepth)
+        float ShadowCalculation(vec3 fragPosWorld, vec3 normal, vec3 lightDir, float viewSpaceDepth, int baseLayerIndex)
         {
             // 1. 选择级联层级
             int layer = -1;
@@ -4815,15 +5539,11 @@ void Renderer::init() {
                 }
             }
             if (layer == -1) layer = cascadeCount;
-
-            // ------------------------------------------------------------------
-            // [核心修复]：混合权重计算 (同时考虑 Z轴 和 UV边界)
-            // ------------------------------------------------------------------
             
             // A. 计算 Z 轴混合权重 (基于视锥分割距离)
             float blendFactor = 0.0;
             int nextLayer = layer + 1;
-            if (nextLayer > cascadeCount) nextLayer = cascadeCount; // 保护
+            if (nextLayer > cascadeCount) nextLayer = cascadeCount;
             
             if (layer < cascadeCount) {
                 float splitDist = cascadePlaneDistances[layer];
@@ -4835,9 +5555,13 @@ void Renderer::init() {
                 }
             }
 
+            // 计算全局矩阵索引 = baseLayerIndex + 局部layer
+            int currentMatrixIndex = baseLayerIndex + layer;
+            int nextMatrixIndex    = baseLayerIndex + nextLayer;
+
             // B. 计算 UV 边缘混合权重 (防止侧面漏光/阴影截断)
             // 我们提前计算当前层在光空间的位置，看看是否快出界了
-            vec4 fragPosLightSpace = lightSpaceMatrices[layer] * vec4(fragPosWorld, 1.0);
+            vec4 fragPosLightSpace = lightSpaceMatrices[currentMatrixIndex] * vec4(fragPosWorld, 1.0);
             vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
             projCoords = projCoords * 0.5 + 0.5;
 
@@ -4860,31 +5584,31 @@ void Renderer::init() {
             }
 
             // ------------------------------------------------------------------
-            // 下面是通用的 PCF 采样逻辑 (基本不用动)
+            // 下面是通用的 PCF 采样逻辑
             // ------------------------------------------------------------------
+
+            // 采样循环
+            int layersToSample = (blendFactor > 0.001) ? 2 : 1;
+            float layerShadows[2]; 
+            layerShadows[0] = 1.0; layerShadows[1] = 1.0; // 默认为1.0(亮)
             
+            // PCF 参数
             vec3 N = normalize(normal);
             vec3 L = normalize(lightDir);
             float cosTheta = clamp(dot(N, L), 0.0, 1.0);
             float baseBias = shadowBias * (1.0 - cosTheta);
             baseBias = max(baseBias, shadowBias * 0.1);
-
-            // 泊松旋转
             float rotAngle = random(vec3(gl_FragCoord.xy, 1.0), 0) * 6.283185;
             float s = sin(rotAngle); float c = cos(rotAngle);
             mat2 rot = mat2(c, -s, s, c);
 
-            // 采样循环：如果 blendFactor > 0，我们需要采样两层
-            int layersToSample = (blendFactor > 0.001) ? 2 : 1;
-            float layerShadows[2]; 
-            layerShadows[0] = 1.0; layerShadows[1] = 1.0; // 默认为1.0(亮)
-
             for (int i = 0; i < layersToSample; ++i) 
             {
-                int currentLayer = (i == 0) ? layer : nextLayer;
+                int activeLocalLayer = (i == 0) ? layer : nextLayer;
+                int activeGlobalIndex = baseLayerIndex + activeLocalLayer;
                 
                 // 计算当前层级的坐标
-                vec4 fPosLight = lightSpaceMatrices[currentLayer] * vec4(fragPosWorld, 1.0);
+                vec4 fPosLight = lightSpaceMatrices[activeGlobalIndex] * vec4(fragPosWorld, 1.0);
                 vec3 pCoords = fPosLight.xyz / fPosLight.w;
                 pCoords = pCoords * 0.5 + 0.5;
 
@@ -4894,26 +5618,19 @@ void Renderer::init() {
                     continue; 
                 }
 
-                // 计算 Bias
-                vec3 N = normalize(normal);
-                vec3 L = normalize(lightDir);
-                float cosTheta = clamp(dot(N, L), 0.0, 1.0);
-                
-                // 基础 Bias
-                float baseBias = shadowBias * (1.0 - cosTheta);
-                baseBias = max(baseBias, shadowBias * 0.1);
+                // 级联 Bias 调整
+                float currentBias = baseBias;
+                if (activeLocalLayer == 1) currentBias *= 0.5;
+                else if (activeLocalLayer == 2) currentBias *= 0.25;
+                else if (activeLocalLayer == 3) currentBias *= 0.125;
 
-                if (currentLayer == 1) baseBias *= 0.5;
-                else if (currentLayer == 2) baseBias *= 0.25;
-                else if (currentLayer == 3) baseBias *= 0.125;
-
-                float currentDepth = pCoords.z - baseBias;
+                float currentDepth = pCoords.z - currentBias;
                 
                 // 设置 PCF 半径
                 float filterRadius = 1.0;
-                if (currentLayer == 0) filterRadius = 4.0;
-                else if (currentLayer == 1) filterRadius = 2.0;
-                else if (currentLayer == 2) filterRadius = 1.0;
+                if (activeLocalLayer == 0) filterRadius = 4.0;
+                else if (activeLocalLayer == 1) filterRadius = 2.0;
+                else if (activeLocalLayer == 2) filterRadius = 1.0;
                 else filterRadius = 0.5;
 
                 vec2 texSize = 1.0 / textureSize(shadowMap, 0).xy;
@@ -4922,7 +5639,7 @@ void Renderer::init() {
                 for(int k = 0; k < 16; ++k)
                 {
                     vec2 offset = rot * poissonDisk[k];
-                    shadowSum += texture(shadowMap, vec4(pCoords.xy + offset * texSize * filterRadius, currentLayer, currentDepth));
+                    shadowSum += texture(shadowMap, vec4(pCoords.xy + offset * texSize * filterRadius, activeGlobalIndex, currentDepth));
                 }
                 layerShadows[i] = shadowSum / 16.0; 
             }
@@ -4935,12 +5652,95 @@ void Renderer::init() {
             
             return finalVisibility; 
         }
+
+        // 用于点光源 PCF 的采样偏移向量 (20个方向)
+        vec3 gridSamplingDisk[20] = vec3[](
+           vec3(1, 1,  1), vec3( 1, -1,  1), vec3(-1, -1,  1), vec3(-1, 1,  1), 
+           vec3(1, 1, -1), vec3( 1, -1, -1), vec3(-1, -1, -1), vec3(-1, 1, -1),
+           vec3(1, 1,  0), vec3( 1, -1,  0), vec3(-1, -1,  0), vec3(-1, 1,  0),
+           vec3(1, 0,  1), vec3(-1,  0,  1), vec3( 1,  0, -1), vec3(-1, 0, -1),
+           vec3(0, 1,  1), vec3( 0, -1,  1), vec3( 0, -1, -1), vec3( 0, 1, -1)
+        );
+
+        // 点光源阴影计算函数
+        float CalcPointShadow(vec3 fragPos, vec3 lightPos, int shadowIndex, float range, float radius, float bias)
+        {
+            // 注意：我们之前用 uniform 传了 pointShadowFarPlanes
+            // 但其实对于现代物理光照，Range 本身就是 FarPlane (光照在 Range 处归零)
+            // 所以我们可以直接用 light.range 作为远平面
+            float farPlane = range; 
+            
+            vec3 fragToLight = fragPos - lightPos;
+            float currentDepth = length(fragToLight);
+            
+            float shadow = 0.0;
+            int samples = 20;
+            float viewDistance = length(viewPos - fragPos);
+            
+            // 使用 radius 参数控制模糊程度
+            // 公式：(1 + viewDist/range) * radius / divider
+            // 用户输入的 radius 是 0.0 ~ 0.5
+            float diskRadius = (1.0 + (viewDistance / farPlane)) * radius; 
+            
+            float rotX = random(vec3(gl_FragCoord.xy, 1.0), 1);
+            float rotY = random(vec3(gl_FragCoord.xy, 1.0), 2);
+            float rotZ = random(vec3(gl_FragCoord.xy, 1.0), 3);
+            vec3 rotationDir = normalize(vec3(rotX, rotY, rotZ)); 
+            
+            for(int i = 0; i < samples; ++i)
+            {
+                float closestDepth = 0.0;
+                vec3 sampleOffset = reflect(gridSamplingDisk[i], rotationDir);
+                vec3 sampleDir = fragToLight + sampleOffset * diskRadius;
+
+                if (shadowIndex == 0) closestDepth = texture(pointShadowMaps[0], sampleDir).r;
+                else if (shadowIndex == 1) closestDepth = texture(pointShadowMaps[1], sampleDir).r;
+                else if (shadowIndex == 2) closestDepth = texture(pointShadowMaps[2], sampleDir).r;
+                else if (shadowIndex == 3) closestDepth = texture(pointShadowMaps[3], sampleDir).r;
+                
+                closestDepth *= farPlane;
+                
+                if(currentDepth - bias > closestDepth)
+                    shadow += 1.0;
+            }
+            shadow /= float(samples);
+            return 1.0 - shadow;
+        }
+
+        // 物理正确的窗口化反平方衰减
+        // distance: 像素到光源距离
+        // range: 光源设定的半径
+        float GetAttenuation(float distance, float range) {
+            // 1. 基础反平方 ( Inverse Square Law )
+            // 加一个小数值防止除零 (0.01 或 1.0 取决于单位，这里假设 1 unit = 1 meter)
+            float attenuation = 1.0 / (distance * distance + 1.0); 
+            
+            // 2. 窗口函数 (Windowing Function) - 让光在 range 处平滑归零
+            // 来自 Unreal Engine / Frostbite 的公式
+            float distDivRange = distance / range;
+            float factor = distDivRange * distDivRange; // (d/r)^2
+            factor = factor * factor;                   // (d/r)^4
+            float window = clamp(1.0 - factor, 0.0, 1.0);
+            
+            return attenuation * window * window;
+        }
     )";
 
     _mainShader.reset(new GLSLProgram);
     _mainShader->attachVertexShader(vsCode);
     _mainShader->attachFragmentShader(fsCode);
     _mainShader->link();
+
+    // 预设纹理槽位，防止采样器冲突
+    _mainShader->use();
+    _mainShader->setUniformInt("diffuseMap", 0);  // Slot 0: Albedo
+    _mainShader->setUniformInt("normalMap", 1);   // Slot 1: Normal
+    _mainShader->setUniformInt("shadowMap", 2);   // Slot 2: CSM Array
+    _mainShader->setUniformInt("envMap", 3);      // Slot 3: IBL Cubemap (改到3，避开NormalMap)
+
+    // Slot 4,5,6,7 用于点光源阴影
+    int pointShadowSamplers[4] = {4, 5, 6, 7};
+    glUniform1iv(glGetUniformLocation(_mainShader->getHandle(), "pointShadowMaps"), 4, pointShadowSamplers);
 
     // =============================================================
     // 1. 无限网格 Shader (Unity 风格)
@@ -5127,6 +5927,10 @@ void Renderer::init() {
 
     // 4. 初始化 ShadowMapPass
     _shadowPass = std::make_unique<ShadowMapPass>(4096);
+
+    // 5. 初始化 PointShadowPass
+    // 分辨率 1024，最大支持 4 个点光源
+    _pointShadowPass = std::make_unique<PointShadowPass>(1024, 4);
 }
 
 void Renderer::onResize(int width, int height) {
@@ -5140,35 +5944,86 @@ void Renderer::render(const Scene& scene, Camera* camera,
                       float contentScale,
                       GameObject* selectedObj)
 {
-    // ===============================================
     // Pass -1: 烘焙反射探针 (Bake Reflection Probes)
-    // ===============================================
     // 在渲染主画面之前，先更新场景里的“镜子”所看到的景象
     updateReflectionProbes(scene);
 
     // ===============================================
-    // Pass -0.5: Render Shadows (Shadow Mapping) [新增]
+    // Pass -0.5: 阴影准备与渲染
     // ===============================================
-    // 找到主光源
-    LightComponent* mainLight = nullptr;
-    glm::vec3 lightDir(0, -1, 0);
     
+    // 1. 收集并分类光源
+    std::vector<LightComponent*> dirLights;
+    std::vector<LightComponent*> pointLights;
+    std::vector<LightComponent*> spotLights;
+    
+    // 用于传递给 ShadowPass 的纯数据
+    std::vector<ShadowCasterInfo> csmCasters; // 平行光
+    std::vector<PointShadowInfo> pointShadowInfos; // 点光源
+    
+    // 记录光源组件对应的纹理层级索引 (LightComponent* -> LayerIndex)
+    std::unordered_map<LightComponent*, int> lightToShadowIndex;
+
+    int csmLayersPerLight = _shadowPass->getCascadeCount(); // 通常是 5 (4级联 + 1)
+    
+    // 遍历场景收集光源
     for (const auto& go : scene.getGameObjects()) {
         auto light = go->getComponent<LightComponent>();
-        if (light && light->enabled && light->type == LightType::Directional) {
-            lightDir = go->transform.rotation * glm::vec3(0, 0, -1);
-            mainLight = light; // 记录下来
-            break; 
+        if (light && light->enabled) {
+            if (light->type == LightType::Directional) {
+                dirLights.push_back(light);
+                
+                // 判断是否投射阴影 (且未超过最大限制，假设 ShadowPass 支持 4 个)
+                // 注意：这里 4 必须与 ShadowMapPass 构造时的 maxLights 一致
+                if (light->castShadows && csmCasters.size() < 4) {
+                    ShadowCasterInfo info;
+                    // 计算光的方向 (物体的前方是 -Z，应用旋转)
+                    info.direction = go->transform.rotation * glm::vec3(0, 0, -1);
+                    info.shadowNormalBias = light->shadowNormalBias;
+                    info.cullFaceMode = light->shadowCullFace;
+                    
+                    csmCasters.push_back(info);
+                    
+                    // 计算该光源在 TextureArray 中的起始层级
+                    // 第 0 个光源用 0~4 层，第 1 个用 5~9 层...
+                    int baseLayer = (int)(csmCasters.size() - 1) * csmLayersPerLight;
+                    lightToShadowIndex[light] = baseLayer;
+                } else {
+                    lightToShadowIndex[light] = -1; // 不投射阴影
+                }
+            }
+            else if (light->type == LightType::Point) {
+                pointLights.push_back(light);
+
+                // 检查是否开启阴影且未超限 (PointShadowPass 最大支持 4 个)
+                if (light->castShadows && pointShadowInfos.size() < _pointShadowPass->getMaxLights()) {
+                    PointShadowInfo info;
+                    info.position = go->transform.position;
+                    info.farPlane = light->range;
+                    info.lightIndex = (int)pointShadowInfos.size(); // 0, 1, 2, 3...
+
+                    pointShadowInfos.push_back(info);
+                    lightToShadowIndex[light] = info.lightIndex;
+                } else {
+                    lightToShadowIndex[light] = -1;
+                }
+            }
+            else if (light->type == LightType::Spot) {
+                spotLights.push_back(light);
+            }
         }
     }
+
+    // 2. 执行 Shadow Passes
+    // 渲染平行光 (CSM)
+    _shadowPass->render(scene, csmCasters, camera);
     
-    float nBias = mainLight ? mainLight->shadowNormalBias : 0.0f; // 获取 Normal Bias
+    // 渲染点光源 (Omnidirectional)
+    _pointShadowPass->render(scene, pointShadowInfos);
 
-    unsigned int cullMode = mainLight ? mainLight->shadowCullFace : GL_BACK;
-
-    // CSM 不需要 shadowProjectionSize (因为它会自动计算视锥切片大小)，或者你可以保留它用于非透视相机
-    // 这里我们依然调用 render，shadowPass 内部会处理多级渲染
-    _shadowPass->render(scene, lightDir, camera, nBias, cullMode);
+    // ===============================================
+    // Pass 1: 主场景渲染
+    // ===============================================
 
     // 1. 绑定目标 FBO
     glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
@@ -5184,20 +6039,27 @@ void Renderer::render(const Scene& scene, Camera* camera,
     glm::mat4 proj = camera->getProjectionMatrix();
     glm::vec3 viewPos = camera->transform.position;
 
-    // 绑定 CSM 纹理数组 (Texture Array) 到 Slot 2
+    // 绑定阴影纹理数组到 Slot 2
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D_ARRAY, _shadowPass->getDepthMapArray());
 
-    // --- Pass 0: 天空盒 ---
+    // 绑定 Point Shadow Cubemaps 到 Slot 4, 5, 6, 7
+    // Slot 0: Diffuse, Slot 1: Env, Slot 2: CSM, Slot 3: Reserved
+    for (int i = 0; i < pointShadowInfos.size(); ++i) {
+        glActiveTexture(GL_TEXTURE4 + i);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, _pointShadowPass->getShadowMap(i));
+    }
+
+    // 绘制天空盒
     drawSkybox(view, proj);
 
-    // --- Pass 1 & 2: 物体渲染 (光照 + 绘制) ---
-    drawSceneObjects(scene, view, proj, viewPos);
+    // 绘制场景物体 (传入收集好的光源数据)
+    drawSceneObjects(scene, view, proj, viewPos, dirLights, pointLights, spotLights, lightToShadowIndex);
 
-    // --- Pass 2.5: 网格 ---
+    // 绘制网格
     drawGrid(view, proj, viewPos);
 
-    // --- Pass 3: 描边 ---
+    // 绘制描边
     if (selectedObj) {
         // OutlinePass 需要传入宽高用于重新生成纹理
         _outlinePass->render(selectedObj, camera, contentScale, width, height);
@@ -5248,7 +6110,13 @@ void Renderer::drawGrid(const glm::mat4& view, const glm::mat4& proj, const glm:
     glDisable(GL_BLEND);
 }
 
-void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, const GameObject* excludeObject) {
+void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, 
+                                const std::vector<LightComponent*>& dirLights,
+                                const std::vector<LightComponent*>& pointLights,
+                                const std::vector<LightComponent*>& spotLights,
+                                const std::unordered_map<LightComponent*, int>& shadowIndices,
+                                const GameObject* excludeObject)
+{
     _mainShader->use();
     _mainShader->setUniformMat4("projection", proj);
     _mainShader->setUniformMat4("view", view);
@@ -5256,10 +6124,10 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
 
     _mainShader->setUniformBool("isDebug", false);
 
-    // 1. 告诉 Shader 阴影图在 Slot 2
-    _mainShader->setUniformInt("shadowMap", 2); 
+    // 1. 设置阴影相关 Uniforms
+    _mainShader->setUniformInt("shadowMap", 2);
 
-    // 2. 传递矩阵数组 (lightSpaceMatrices[16])
+    // 传递矩阵数组
     const auto& matrices = _shadowPass->getLightSpaceMatrices();
     if (!matrices.empty()) {
         GLint loc = glGetUniformLocation(_mainShader->getHandle(), "lightSpaceMatrices");
@@ -5268,7 +6136,7 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         }
     }
 
-    // 3. 传递级联分割距离 (cascadePlaneDistances[16])
+    // 传递级联分割距离
     const auto& levels = _shadowPass->getCascadeLevels();
     if (!levels.empty()) {
         GLint loc = glGetUniformLocation(_mainShader->getHandle(), "cascadePlaneDistances");
@@ -5278,72 +6146,111 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         _mainShader->setUniformInt("cascadeCount", (int)levels.size());
     }
 
-    glFrontFace(GL_CCW);
+    // 我们假设所有灯光共享同一个 shadowBias (或者取第一个开启阴影的灯的配置)
+    // 如果想每个灯不同，需要在 shader struct 里加 bias 字段
+    // 这里简单处理，取一个默认值或第一个灯的值
+    float globalBias = 0.001f;
+    for(auto l : dirLights) if(l->castShadows) { globalBias = l->shadowBias; break; }
+    _mainShader->setUniformFloat("shadowBias", globalBias);
 
-    glEnable(GL_CULL_FACE);
-    glCullFace(GL_BACK);
-
-    // 1. 收集光源 (Lighting Loop)
-    int dirCount = 0, pointCount = 0, spotCount = 0;
-    
-    for (const auto& go : scene.getGameObjects()) {
-        auto light = go->getComponent<LightComponent>();
-        if (light && light->enabled) {
-            // ... (复制 SceneRoaming 中的光源收集逻辑，注意变量名 go->transform) ...
-            // 注意：这里需要原封不动地把那段长长的 if/else light type 判断拷过来
-            // 并调用 _mainShader->setUniform...
-            std::string baseName;
-            if (light->type == LightType::Directional && dirCount < 2)
-            {
-                baseName = "dirLights[" + std::to_string(dirCount++) + "]";
-                glm::vec3 dir = go->transform.rotation * glm::vec3(0, 0, -1);
-                _mainShader->setUniformVec3(baseName + ".direction", dir);
-                _mainShader->setUniformFloat("shadowBias", light->shadowBias);
-            }
-            else if (light->type == LightType::Point && pointCount < 4)
-            {
-                baseName = "pointLights[" + std::to_string(pointCount++) + "]";
-                _mainShader->setUniformVec3(baseName + ".position", go->transform.position);
-                _mainShader->setUniformFloat(baseName + ".constant", light->constant);
-                _mainShader->setUniformFloat(baseName + ".linear", light->linear);
-                _mainShader->setUniformFloat(baseName + ".quadratic", light->quadratic);
-
-                // 同步 Gizmo 颜色
-                if (auto mesh = go->getComponent<MeshComponent>()) {
-                    if (mesh->isGizmo) mesh->material.diffuse = light->color;
-                }
-            }
-            else if (light->type == LightType::Spot && spotCount < 4)
-            {
-                baseName = "spotLights[" + std::to_string(spotCount++) + "]";
-                _mainShader->setUniformVec3(baseName + ".position", go->transform.position);
-                glm::vec3 dir = go->transform.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
-                _mainShader->setUniformVec3(baseName + ".direction", dir);
-                _mainShader->setUniformFloat(baseName + ".cutOff", light->cutOff);
-                _mainShader->setUniformFloat(baseName + ".outerCutOff", light->outerCutOff);
-                _mainShader->setUniformFloat(baseName + ".constant", light->constant);
-                _mainShader->setUniformFloat(baseName + ".linear", light->linear);
-                _mainShader->setUniformFloat(baseName + ".quadratic", light->quadratic);
-
-                if (auto mesh = go->getComponent<MeshComponent>()) {
-                    if (mesh->isGizmo) mesh->material.diffuse = light->color;
-                }
-            }
-
-            if (!baseName.empty())
-            {
-                _mainShader->setUniformVec3(baseName + ".color", light->color);
-                _mainShader->setUniformFloat(baseName + ".intensity", light->intensity);
-            }
-        }
+    // 2. Point Shadows -> Slot 4, 5, 6, 7
+    // 告诉 Shader：pointShadowMaps[0] 在纹理单元 4，[1] 在 5...
+    int pointShadowSamplers[4] = {4, 5, 6, 7};
+    GLint locPointMaps = glGetUniformLocation(_mainShader->getHandle(), "pointShadowMaps");
+    if (locPointMaps != -1) {
+        // 传递数组
+        glUniform1iv(locPointMaps, 4, pointShadowSamplers);
     }
-    _mainShader->setUniformInt("dirLightCount", dirCount);
-    _mainShader->setUniformInt("pointLightCount", pointCount);
-    _mainShader->setUniformInt("spotLightCount", spotCount);
+
+    // 传递 Far Planes (用于深度归一化)
+    // 我们需要在 shadowIndices 中查找哪些灯开启了阴影，并收集它们的 FarPlane
+    // 这里简单处理：我们在 render() 里硬编码了 50.0f，这里需要保持一致
+    // 更好的做法是将 farPlane 存在 LightComponent 或者 render() 传进来
+    float pointShadowFarPlanes[4] = {50.0f, 50.0f, 50.0f, 50.0f}; 
+    GLint locFarPlanes = glGetUniformLocation(_mainShader->getHandle(), "pointShadowFarPlanes");
+    if (locFarPlanes != -1) {
+        glUniform1fv(locFarPlanes, 4, pointShadowFarPlanes);
+    }
+
+    // 2. 提交光源数据
+    int maxDir = 4; // Shader 中定义的 NR_DIR_LIGHTS
+    int countDir = 0;
+    for (auto light : dirLights) {
+        if (countDir >= maxDir) break;
+        std::string base = "dirLights[" + std::to_string(countDir) + "]";
+        
+        glm::vec3 dir = light->owner->transform.rotation * glm::vec3(0, 0, -1);
+        _mainShader->setUniformVec3(base + ".direction", dir);
+        _mainShader->setUniformVec3(base + ".color", light->color);
+        _mainShader->setUniformFloat(base + ".intensity", light->intensity);
+        
+        // 设置 Shadow Index
+        int idx = -1;
+        if (shadowIndices.count(light)) {
+            idx = shadowIndices.at(light);
+        }
+        _mainShader->setUniformInt(base + ".shadowIndex", idx);
+        
+        countDir++;
+    }
+    _mainShader->setUniformInt("dirLightCount", countDir);
+
+    int maxPoint = 4;
+    int countPoint = 0;
+    for (auto light : pointLights) {
+        if (countPoint >= maxPoint) break;
+        std::string base = "pointLights[" + std::to_string(countPoint) + "]";
+        _mainShader->setUniformVec3(base + ".position", light->owner->transform.position);
+        _mainShader->setUniformVec3(base + ".color", light->color);
+        _mainShader->setUniformFloat(base + ".intensity", light->intensity);
+        _mainShader->setUniformFloat(base + ".range", light->range);
+
+        int idx = -1;
+        if (shadowIndices.count(light)) idx = shadowIndices.at(light);
+        _mainShader->setUniformInt(base + ".shadowIndex", idx);
+
+        // 即使 idx == -1 (无阴影)，也可以传进去，反正 Shader 里有 if 判断
+        _mainShader->setUniformFloat(base + ".shadowStrength", light->shadowStrength);
+        _mainShader->setUniformFloat(base + ".shadowRadius", light->shadowRadius);
+        _mainShader->setUniformFloat(base + ".shadowBias", light->shadowBias);
+        
+        // 顺便更新 Gizmo 颜色 (可选)
+        if (auto mesh = light->owner->getComponent<MeshComponent>()) {
+            if (mesh->isGizmo) mesh->material.albedo = light->color;
+        }
+        countPoint++;
+    }
+    _mainShader->setUniformInt("pointLightCount", countPoint);
+
+    int maxSpot = 4;
+    int countSpot = 0;
+    for (auto light : spotLights) {
+        if (countSpot >= maxSpot) break;
+        std::string base = "spotLights[" + std::to_string(countSpot) + "]";
+        glm::vec3 dir = light->owner->transform.rotation * glm::vec3(0, 0, -1);
+        
+        _mainShader->setUniformVec3(base + ".position", light->owner->transform.position);
+        _mainShader->setUniformVec3(base + ".direction", dir);
+        _mainShader->setUniformVec3(base + ".color", light->color);
+        _mainShader->setUniformFloat(base + ".intensity", light->intensity);
+        _mainShader->setUniformFloat(base + ".cutOff", light->cutOff);
+        _mainShader->setUniformFloat(base + ".outerCutOff", light->outerCutOff);
+        _mainShader->setUniformFloat(base + ".range", light->range);
+        
+        if (auto mesh = light->owner->getComponent<MeshComponent>()) {
+            if (mesh->isGizmo) mesh->material.albedo = light->color;
+        }
+        countSpot++;
+    }
+    _mainShader->setUniformInt("spotLightCount", countSpot);
 
     _mainShader->setUniformInt("diffuseMap", 0);
 
-    // 2. 绘制物体 (Mesh Loop)
+    // 3. 绘制物体 Loop
+    glFrontFace(GL_CCW);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+
     for (const auto& go : scene.getGameObjects()) {
         // 排除特定物体 (防止烘焙时自己遮挡自己)
         if (excludeObject && go.get() == excludeObject) continue;
@@ -5369,13 +6276,26 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, 0);
         }
+
+        if (meshComp->normalMap) {
+            meshComp->normalMap->bind(1); // 绑定到 Slot 1
+            _mainShader->setUniformBool("hasNormalMap", true);
+            _mainShader->setUniformFloat("normalStrength", meshComp->normalStrength);
+            _mainShader->setUniformBool("flipNormalY", meshComp->flipNormalY);
+        } else {
+            _mainShader->setUniformBool("hasNormalMap", false);
+        }
         
         _mainShader->setUniformBool("isUnlit", meshComp->isGizmo);
         _mainShader->setUniformBool("isDoubleSided", meshComp->doubleSided);
-        _mainShader->setUniformVec3("material.ambient", meshComp->material.ambient);
-        _mainShader->setUniformVec3("material.diffuse", meshComp->material.diffuse);
-        _mainShader->setUniformVec3("material.specular", meshComp->material.specular);
-        _mainShader->setUniformFloat("material.shininess", meshComp->material.shininess);
+        // _mainShader->setUniformVec3("material.ambient", meshComp->material.ambient);
+        // _mainShader->setUniformVec3("material.diffuse", meshComp->material.diffuse);
+        // _mainShader->setUniformVec3("material.specular", meshComp->material.specular);
+        // _mainShader->setUniformFloat("material.shininess", meshComp->material.shininess);
+        _mainShader->setUniformVec3("material.albedo", meshComp->material.albedo);
+        _mainShader->setUniformFloat("material.metallic", meshComp->material.metallic);
+        _mainShader->setUniformFloat("material.roughness", meshComp->material.roughness);
+        _mainShader->setUniformFloat("material.ao", meshComp->material.ao);
 
         _mainShader->setUniformFloat("material.reflectivity", meshComp->material.reflectivity);
         _mainShader->setUniformFloat("material.refractionIndex", meshComp->material.refractionIndex);
@@ -5383,15 +6303,30 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
 
         _mainShader->setUniformBool("useTriplanar", meshComp->useTriplanar);
         _mainShader->setUniformFloat("triplanarScale", meshComp->triplanarScale);
+        glm::vec3 flipPos(
+            meshComp->triFlipPosX ? 1.0f : 0.0f,
+            meshComp->triFlipPosY ? 1.0f : 0.0f,
+            meshComp->triFlipPosZ ? 1.0f : 0.0f
+        );
+        _mainShader->setUniformVec3("triFlipPos", flipPos);
+        glm::vec3 flipNeg(
+            meshComp->triFlipNegX ? 1.0f : 0.0f,
+            meshComp->triFlipNegY ? 1.0f : 0.0f,
+            meshComp->triFlipNegZ ? 1.0f : 0.0f
+        );
+        _mainShader->setUniformVec3("triFlipNeg", flipNeg);
+        glm::vec3 rotPos(meshComp->triRotPosX, meshComp->triRotPosY, meshComp->triRotPosZ);
+        _mainShader->setUniformVec3("triRotPos", rotPos);
+        glm::vec3 rotNeg(meshComp->triRotNegX, meshComp->triRotNegY, meshComp->triRotNegZ);
+        _mainShader->setUniformVec3("triRotNeg", rotNeg);
 
         auto probe = go->getComponent<ReflectionProbeComponent>();
         if (probe && probe->textureID != 0) {
             // 如果这个物体本身就是一个反射探针，我们就使用它生成的 Environment Map
-            glActiveTexture(GL_TEXTURE1);
+            glActiveTexture(GL_TEXTURE3);
             glBindTexture(GL_TEXTURE_CUBE_MAP, probe->textureID);
             
             _mainShader->setUniformBool("hasEnvMap", true);
-            _mainShader->setUniformInt("envMap", 1); // 告诉 Shader 去纹理单元 1 找
             
             // 计算并传递 Box 参数
             // 假设探针中心就是物体中心
@@ -5406,6 +6341,11 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         } else {
             _mainShader->setUniformBool("hasEnvMap", false);
         }
+
+        // [新增] IBL 强度控制
+        // 建议：如果你觉得场景太亮，这里可以传 0.5 或者 0.3
+        // 暂时硬编码为 0.5 试试，或者后续在 Inspector 里加个 Scene Settings
+        _mainShader->setUniformFloat("iblIntensity", 0.4f);
 
         // 计算 Model Matrix
         glm::mat4 modelMatrix = go->transform.getLocalMatrix();
@@ -5424,6 +6364,19 @@ void Renderer::updateReflectionProbes(const Scene& scene)
     // 获取当前视口，以便烘焙完后恢复
     GLint prevViewport[4];
     glGetIntegerv(GL_VIEWPORT, prevViewport);
+
+    // 1. 预先收集光源 (为了简单起见，反射探针渲染时不开启阴影)
+    std::vector<LightComponent*> dirLights, pointLights, spotLights;
+    std::unordered_map<LightComponent*, int> emptyShadowIndices; // 空 map，表示无阴影
+
+    for (const auto& go : scene.getGameObjects()) {
+        auto light = go->getComponent<LightComponent>();
+        if (light && light->enabled) {
+            if (light->type == LightType::Directional) dirLights.push_back(light);
+            else if (light->type == LightType::Point) pointLights.push_back(light);
+            else if (light->type == LightType::Spot) spotLights.push_back(light);
+        }
+    }
 
     // 遍历所有物体，找带 ReflectionProbeComponent 的
     for (const auto& go : scene.getGameObjects())
@@ -5468,7 +6421,9 @@ void Renderer::updateReflectionProbes(const Scene& scene)
 
             // B. 画场景物体
             // 关键：传入 go.get() 作为 excludeObject，防止画自己
-            drawSceneObjects(scene, shadowViews[i], shadowProj, probePos, go.get());
+            drawSceneObjects(scene, shadowViews[i], shadowProj, probePos, 
+                             dirLights, pointLights, spotLights, emptyShadowIndices, 
+                             go.get());
         }
 
         // 6个面都画完了，生成 Mipmap
@@ -5488,6 +6443,7 @@ void Renderer::updateReflectionProbes(const Scene& scene)
 
 #include <memory>
 #include <vector>
+#include <unordered_map>
 #include <glad/gl.h>
 
 #include "scene.h"
@@ -5496,6 +6452,7 @@ void Renderer::updateReflectionProbes(const Scene& scene)
 #include "outline_pass.h"
 #include "geometry_factory.h"
 #include "shadow_map_pass.h"
+#include "point_shadow_pass.h"
 
 class Renderer
 {
@@ -5522,7 +6479,9 @@ private:
     std::unique_ptr<GLSLProgram> _mainShader;
     std::unique_ptr<GLSLProgram> _gridShader;
     std::unique_ptr<GLSLProgram> _skyboxShader;
+    
     std::unique_ptr<ShadowMapPass> _shadowPass;
+    std::unique_ptr<PointShadowPass> _pointShadowPass;
 
     // --- 全局模型 ---
     std::shared_ptr<Model> _gridPlane;
@@ -5534,7 +6493,12 @@ private:
     // --- 内部绘制函数 ---
     void drawSkybox(const glm::mat4& view, const glm::mat4& proj);
     void drawGrid(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos);
-    void drawSceneObjects(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, const GameObject* excludeObject = nullptr);
+    void drawSceneObjects(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, 
+                          const std::vector<LightComponent*>& dirLights,
+                          const std::vector<LightComponent*>& pointLights,
+                          const std::vector<LightComponent*>& spotLights,
+                          const std::unordered_map<LightComponent*, int>& shadowIndices,
+                          const GameObject* excludeObject = nullptr);
     // 更新场景中的所有反射探针
     void updateReflectionProbes(const Scene& scene);
 };
@@ -5768,9 +6732,10 @@ GameObject* Scene::createCube()
     auto meshComp = go->addComponent<MeshComponent>(GeometryFactory::createCube());
     
     // 初始化默认参数
-    meshComp->shapeType = MeshShapeType::Cube;
-    meshComp->params.size = 1.0f;
-    meshComp->material.diffuse = glm::vec3(0.8f);
+    meshComp->material.albedo = glm::vec3(0.8f); 
+    meshComp->material.roughness = 0.5f;
+    meshComp->material.metallic = 0.0f;
+    meshComp->material.ao = 1.0f;
 
     // 存入容器
     _gameObjects.push_back(std::unique_ptr<GameObject>(go));
@@ -5782,12 +6747,13 @@ GameObject* Scene::createPointLight()
     auto go = new GameObject("Point Light");
     auto lightComp = go->addComponent<LightComponent>(LightType::Point);
     lightComp->color = glm::vec3(1.0f, 1.0f, 0.0f);
+    lightComp->range = 10.0f;
 
     // 光源可视化 (Gizmo)
     auto meshComp = go->addComponent<MeshComponent>(GeometryFactory::createSphere(0.2f), true);
     meshComp->shapeType = MeshShapeType::Sphere;
     meshComp->params.radius = 0.2f;
-    meshComp->material.diffuse = lightComp->color;
+    meshComp->material.albedo = lightComp->color;
 
     _gameObjects.push_back(std::unique_ptr<GameObject>(go));
     return go;
@@ -6307,6 +7273,7 @@ public:
 
     std::shared_ptr<Model> model;
     std::shared_ptr<ImageTexture2D> diffuseMap; // 漫反射贴图
+    std::shared_ptr<ImageTexture2D> normalMap; // 法线贴图
     Material material;
 
     // 是否是Gizmo (编辑器辅助物体，如灯泡图标)，渲染时不受光照影响
@@ -6321,6 +7288,22 @@ public:
     // Texture设置
     bool useTriplanar = false; // 是否开启三向映射
     float triplanarScale = 1.0f; // 纹理平铺缩放大小
+    bool triFlipPosX = false; 
+    bool triFlipNegX = false;
+    bool triFlipPosY = false;
+    bool triFlipNegY = false;
+    bool triFlipPosZ = false;
+    bool triFlipNegZ = false;
+    float triRotPosX = 0.0f;
+    float triRotPosY = 0.0f;
+    float triRotPosZ = 0.0f;
+    float triRotNegX = 0.0f;
+    float triRotNegY = 0.0f;
+    float triRotNegZ = 0.0f;
+
+    // 法线贴图设置
+    float normalStrength = 1.0f;
+    bool flipNormalY = false;
 
     MeshShapeType shapeType = MeshShapeType::Cube;
     MeshParams params;
@@ -6346,10 +7329,15 @@ public:
     glm::vec3 color = glm::vec3(1.0f);
     float intensity = 1.0f;
 
+    // 阴影开关
+    // 默认为 true，方便起见，但通常只有 Directional 会用到
+    bool castShadows = true;
+
     // 衰减
-    float constant = 1.0f;
-    float linear = 0.09f;
-    float quadratic = 0.032f;
+    // float constant = 1.0f;
+    // float linear = 0.09f;
+    // float quadratic = 0.032f;
+    float range = 10.0f; // 光照有效半径 (米)
 
     // 聚光
     float cutOff = glm::cos(glm::radians(12.5f));
@@ -6367,6 +7355,10 @@ public:
     // Normal Bias: 对应 Unity 的 "Normal Bias"，收缩模型的程度 (0.0 ~ 3.0)
     // 我们的单位是世界坐标单位，所以默认值设小一点，比如 0.02
     float shadowNormalBias = 0.00f;
+
+    // 阴影艺术控制
+    float shadowStrength = 1.0f; // 0=无阴影, 1=全黑
+    float shadowRadius = 0.05f;  // 控制 PCF 采样范围 (软阴影程度)
 
     LightComponent(LightType t);
 
@@ -6446,18 +7438,18 @@ private:
 #include "shadow_map_pass.h"
 #include <iostream>
 
-ShadowMapPass::ShadowMapPass(int resolution) 
-    : _resolution(resolution)
+ShadowMapPass::ShadowMapPass(int resolution, int maxLights) 
+    : _resolution(resolution), _maxLights(maxLights)
 {
     // 定义级联层级 (分割距离)
-    // 这里我们定义 4 层级联。单位是米。
-    // 能够覆盖近处细节 (0-10m) 到中远距离。
-    // 注意：最后一层不需要存，它就是相机的 zFar。
+    // 实际层级数 = _cascadeLevels.size() + 1
+    // 例如: [10, 50, 200, 800, 2000] -> 5个分割点 -> 6层级联
     _cascadeLevels = { 10.0f, 50.0f, 200.0f, 800.0f, 2000.0f };
-    // 实际层级是: [0, 10], [10, 50], [50, 200], [200, 800], [800, 2000], [2000, zFar] -> 共 6 层
+    
+    _layerCountPerLight = (int)_cascadeLevels.size() + 1;
 
-    // 预分配矩阵空间
-    _lightSpaceMatrices.resize(_cascadeLevels.size() + 1);
+    // 预分配矩阵空间: 灯光数 * 每灯层数
+    _lightSpaceMatrices.resize(_maxLights * _layerCountPerLight);
 
     initShader();
     initFBO();
@@ -6477,10 +7469,12 @@ void ShadowMapPass::initFBO()
     glBindTexture(GL_TEXTURE_2D_ARRAY, _depthMap); // 绑定为数组纹理
 
     // 分配 3D 内存
-    // width, height, depth (层数)。我们有 4 层。
+    // 总层数 = 最大灯光数 * 每个灯光的级联数
+    int totalLayers = _maxLights * _layerCountPerLight;
+
     glTexImage3D(
         GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT32F, 
-        _resolution, _resolution, int(_cascadeLevels.size() + 1), 
+        _resolution, _resolution, totalLayers, 
         0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL
     );
     
@@ -6517,11 +7511,11 @@ void ShadowMapPass::initShader()
     const char* vsCode = R"(
         #version 330 core
         layout (location = 0) in vec3 aPos;
-        layout (location = 1) in vec3 aNormal; // [新增] 我们需要法线
+        layout (location = 1) in vec3 aNormal;
 
         uniform mat4 lightSpaceMatrix;
         uniform mat4 model;
-        uniform float normalBias; // [新增]
+        uniform float normalBias;
 
         void main() {
             // 1. 计算世界空间位置
@@ -6554,15 +7548,19 @@ void ShadowMapPass::initShader()
     _depthShader->link();
 }
 
-void ShadowMapPass::render(const Scene& scene, const glm::vec3& lightDir, Camera* camera, float shadowNormalBias, unsigned int cullFaceMode)
+void ShadowMapPass::render(const Scene& scene, const std::vector<ShadowCasterInfo>& casters, Camera* camera)
 {
-    // 1. 计算每一层的矩阵
-    _lightSpaceMatrices.clear();
+    // 1. 重置矩阵列表
+    // 注意：我们不 clear() 而是 resize，或者直接覆盖，保持大小一致
+    // 如果实际灯光数少于 maxLights，后面的矩阵可以是单位矩阵或无效值
+    int requiredSize = _maxLights * _layerCountPerLight;
+    if (_lightSpaceMatrices.size() != requiredSize) {
+        _lightSpaceMatrices.resize(requiredSize);
+    }
     
-    // 这里的 near/far 必须和相机的设置一致
+    // 获取相机参数
     float camNear = 0.1f;
     float camFar = 1000.0f;
-
     if (auto pCam = dynamic_cast<PerspectiveCamera*>(camera)) {
         camNear = pCam->znear;
         camFar = pCam->zfar;
@@ -6571,63 +7569,69 @@ void ShadowMapPass::render(const Scene& scene, const glm::vec3& lightDir, Camera
         camFar = oCam->zfar;
     }
 
-    // 循环处理每一层
-    // 层级示例: 
-    // 0: [near, 10]
-    // 1: [10, 60]
-    // 2: [60, 250]
-    // 3: [250, far]
-    for (size_t i = 0; i < _cascadeLevels.size() + 1; ++i)
-    {
-        float prevSplit = (i == 0) ? camNear : _cascadeLevels[i - 1];
-        float currSplit = (i < _cascadeLevels.size()) ? _cascadeLevels[i] : camFar;
-
-        _lightSpaceMatrices.push_back(getLightSpaceMatrix(prevSplit, currSplit, lightDir, camera));
-    }
-
-    // 2. 渲染流程
+    // 2. 准备渲染
     glBindFramebuffer(GL_FRAMEBUFFER, _fbo);
     glViewport(0, 0, _resolution, _resolution);
-    
-    // 这里需要把每一层都清空，或者每次绘制前清空
-    glClear(GL_DEPTH_BUFFER_BIT); 
-    // 注意：TextureArray 的 clear 比较特殊，如果不放心，可以在下面循环里 clear，但那样效率略低。
-    // 正确的做法是 glClear 会清除当前绑定的 Attachment。如果当前绑定的是 Layer 0，它只清 Layer 0 吗？
-    // OpenGL 规范比较绕。为了安全起见，我们在循环里做 glClear。
-
     _depthShader->use();
-    // 传递 Normal Bias (如果需要)
-    _depthShader->setUniformFloat("normalBias", shadowNormalBias);
 
-    // 开启剔除 (GL_BACK) 
-    glEnable(GL_CULL_FACE);
-    glCullFace(cullFaceMode);
+    // 为了安全，先清除所有层（或者只清除用到的层）
+    // 为了性能，我们可以在下面的循环中 glClear，但需要注意 GL 状态
+    // 这里最简单的方式是清除整个 FBO，但 FBO 绑定的是 Layer，所以无法一次性清除 Array
+    // 必须在循环里 Clear
 
-    for (size_t i = 0; i < _lightSpaceMatrices.size(); ++i)
+    int lightCount = std::min((int)casters.size(), _maxLights);
+
+    // --- 双重循环：遍历所有光源 ---
+    for (int lightIdx = 0; lightIdx < lightCount; ++lightIdx)
     {
-        // [关键] 绑定当前层
-        glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, _depthMap, 0, i);
-        
-        // 清除这一层的深度
-        glClear(GL_DEPTH_BUFFER_BIT);
+        const auto& caster = casters[lightIdx];
 
-        // 设置当前层的矩阵
-        _depthShader->setUniformMat4("lightSpaceMatrix", _lightSpaceMatrices[i]);
+        // 设置当前光源的参数
+        _depthShader->setUniformFloat("normalBias", caster.shadowNormalBias);
+        glEnable(GL_CULL_FACE);
+        glCullFace(caster.cullFaceMode);
 
-        // 绘制场景
-        for (const auto& go : scene.getGameObjects()) {
-            auto meshComp = go->getComponent<MeshComponent>();
-            if (!meshComp || !meshComp->enabled) continue;
-            if (meshComp->isGizmo) continue;
+        // --- 遍历级联 ---
+        for (int cascadeIdx = 0; cascadeIdx < _layerCountPerLight; ++cascadeIdx)
+        {
+            float prevSplit = (cascadeIdx == 0) ? camNear : _cascadeLevels[cascadeIdx - 1];
+            float currSplit = (cascadeIdx < _cascadeLevels.size()) ? _cascadeLevels[cascadeIdx] : camFar;
 
-            glm::mat4 model = go->transform.getLocalMatrix();
-            model = model * meshComp->model->transform.getLocalMatrix();
-            _depthShader->setUniformMat4("model", model);
+            // 1. 计算矩阵
+            glm::mat4 matrix = getLightSpaceMatrix(prevSplit, currSplit, caster.direction, camera);
+            
+            // 2. 存储矩阵到扁平数组
+            // 索引 = 光源Index * 每光层数 + 当前层
+            int globalLayerIdx = lightIdx * _layerCountPerLight + cascadeIdx;
+            _lightSpaceMatrices[globalLayerIdx] = matrix;
 
-            meshComp->model->draw();
+            // 3. 绑定 FBO 到对应的 Texture Layer
+            glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, _depthMap, 0, globalLayerIdx);
+            
+            // 4. 清除当前层的深度缓冲
+            glClear(GL_DEPTH_BUFFER_BIT);
+
+            // 5. 提交矩阵并绘制
+            _depthShader->setUniformMat4("lightSpaceMatrix", matrix);
+
+            // 绘制场景
+            for (const auto& go : scene.getGameObjects()) {
+                auto meshComp = go->getComponent<MeshComponent>();
+                if (!meshComp || !meshComp->enabled) continue;
+                if (meshComp->isGizmo) continue;
+
+                glm::mat4 model = go->transform.getLocalMatrix();
+                // 叠加 model 自身的 local matrix (如果有)
+                if (meshComp->model) {
+                     model = model * meshComp->model->transform.getLocalMatrix();
+                     _depthShader->setUniformMat4("model", model);
+                     meshComp->model->draw();
+                }
+            }
         }
     }
 
+    // 恢复状态
     glCullFace(GL_BACK);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -6760,40 +7764,51 @@ if (nearPlane > 50.0f) {
 #include "scene.h"
 #include "base/camera.h"
 
+struct ShadowCasterInfo {
+    glm::vec3 direction;
+    float shadowNormalBias;
+    unsigned int cullFaceMode;
+};
+
 class ShadowMapPass
 {
 public:
-    // 分辨率越高，锯齿越少。4096 是现代 PC 的标准配置。
-    ShadowMapPass(int resolution = 4096); 
+    // resolution: 单张贴图分辨率
+    // maxLights: 最大支持的平行光数量
+    ShadowMapPass(int resolution = 4096, int maxLights = 4);
     ~ShadowMapPass();
 
-    // 核心渲染函数：从灯光视角渲染场景
-    void render(const Scene& scene, const glm::vec3& lightDir, Camera* camera, float shadowNormalBias, unsigned int cullFaceMode);
+    // 核心渲染函数：接收光源列表
+    void render(const Scene& scene, const std::vector<ShadowCasterInfo>& casters, Camera* camera);
 
-    // 获取数据供主 Shader 使用
-    GLuint getDepthMapArray() const { return _depthMap; } // 现在这是一个 Texture Array
+    GLuint getDepthMapArray() const { return _depthMap; }
+
+    // 返回所有光源的所有级联矩阵 (展平的一维数组)
+    // 布局: [Light0_Casc0, Light0_Casc1..., Light1_Casc0...]
     const std::vector<glm::mat4>& getLightSpaceMatrices() const { return _lightSpaceMatrices; }
+
     const std::vector<float>& getCascadeLevels() const { return _cascadeLevels; }
-    int getCascadeCount() const { return _lightSpaceMatrices.size(); }
+    int getCascadeCount() const { return (int)_cascadeLevels.size() + 1; } // +1 因为最后一层是 zFar
 
 private:
     int _resolution;
+    int _maxLights;
+    int _layerCountPerLight; // cascadeLevels.size() + 1
+
     GLuint _fbo = 0;
     GLuint _depthMap = 0;
     
-    // CSM 数据
+    // 存储所有光源的矩阵
     std::vector<glm::mat4> _lightSpaceMatrices;
-    std::vector<float> _cascadeLevels; // 存储每一层的分割距离 (远平面)
+    std::vector<float> _cascadeLevels; 
     
     std::unique_ptr<GLSLProgram> _depthShader;
 
     void initFBO();
     void initShader();
 
-    // 内部数学辅助：获取视锥体切片的 8 个角点
     std::vector<glm::vec4> getFrustumCornersWorldSpace(const glm::mat4& proj, const glm::mat4& view);
     
-    // 内部数学辅助：计算单个级联的光照矩阵
     glm::mat4 getLightSpaceMatrix(const float nearPlane, const float farPlane, const glm::vec3& lightDir, Camera* camera);
 };
 ```

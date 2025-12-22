@@ -27,10 +27,12 @@ void Renderer::init() {
         layout(location = 0) in vec3 aPosition;
         layout(location = 1) in vec3 aNormal;
         layout(location = 2) in vec2 aTexCoord;
+        layout(location = 3) in vec3 aTangent;
 
         out vec3 FragPos;
         out vec3 Normal;
         out vec2 TexCoord;
+        out mat3 TBN;
 
         out vec3 LocalPos;
         // 输出视空间深度 (或者直接用 gl_Position.w)
@@ -44,16 +46,35 @@ void Renderer::init() {
             vec4 worldPos = model * vec4(aPosition, 1.0);
             FragPos = vec3(worldPos);
             
-            // 使用 Normal Matrix 修正法线 (防止非均匀缩放导致法线错误)
-            Normal = mat3(transpose(inverse(model))) * aNormal;
-            TexCoord = aTexCoord;
+            // 1. 计算 Normal Matrix (法线矩阵)
+            // 它可以处理非均匀缩放，保证法线方向正确
+            mat3 normalMatrix = mat3(transpose(inverse(model)));
 
+            // 2. 计算世界空间法线 (N)
+            vec3 N = normalize(normalMatrix * aNormal);
+            Normal = N; // 将计算好的法线传给 FS (虽然 FS 可能有了 TBN 会重算，但保留它是个好习惯)
+            
+            // 3. 计算世界空间切线 (T)
+            vec3 T = normalize(normalMatrix * aTangent);
+            
+            // 4. Gram-Schmidt 正交化
+            // 这一步非常关键！它剔除 T 中包含的 N 分量，确保 T 绝对垂直于 N。
+            // 这样可以防止因精度问题或模型数据不佳导致的 TBN 变形。
+            T = normalize(T - dot(T, N) * N);
+            
+            // 5. 计算副切线 (Bitangent, B)
+            // 利用叉乘生成第三个轴
+            vec3 B = cross(N, T);
+            
+            // 6. 构建 TBN 矩阵
+            TBN = mat3(T, B, N);
+
+            TexCoord = aTexCoord;
             LocalPos = aPosition;
             
             gl_Position = projection * view * worldPos;
             
-            // 保存 View Space 的深度 (对于透视投影，w 分量就是 -ViewZ)
-            // 用于 CSM 层级选择
+            // 保存 View Space 的深度
             ClipSpaceZ = gl_Position.w;
         }
     )";
@@ -61,6 +82,7 @@ void Renderer::init() {
     // 片元着色器 (Fragment Shader) - Blinn-Phong 多光源版本
     const char *fsCode = R"(
         #version 330 core
+        #extension GL_ARB_shader_texture_lod : enable
         out vec4 FragColor;
 
         in vec3 FragPos;
@@ -68,32 +90,54 @@ void Renderer::init() {
         in vec2 TexCoord;
         in vec3 LocalPos;
         in float ClipSpaceZ;
+        in mat3 TBN;
 
         // 材质定义
         struct Material {
-            vec3 ambient;
-            vec3 diffuse;
-            vec3 specular;
-            float shininess;
+            vec3 albedo;
+            float metallic;
+            float roughness;
+            float ao;
 
             float reflectivity;
             float refractionIndex;
             float transparency;
-        }; 
+        };
 
+        uniform Material material;
+
+        // 纹理
         uniform sampler2D diffuseMap; 
         uniform bool hasDiffuseMap;
         uniform bool useTriplanar;
         uniform float triplanarScale;
+        uniform vec3 triRotPos; // x,y,z 对应 +X,+Y,+Z 面的角度
+        uniform vec3 triRotNeg; // x,y,z 对应 -X,-Y,-Z 面的角度
+        uniform vec3 triFlipPos;
+        uniform vec3 triFlipNeg;
+        // 法线贴图
+        uniform sampler2D normalMap;
+        uniform bool hasNormalMap;
+        uniform float normalStrength; // 默认 1.0
+        uniform bool flipNormalY;     // 默认 false
 
-        // 动态环境贴图
+        // 动态环境贴图 IBL
         uniform samplerCube envMap;
         uniform bool hasEnvMap;
+        uniform float iblIntensity;
 
-        // 视差校正所需的 Uniforms
+        // 视差校正
         uniform vec3 probePos;    // 探针拍摄时的中心位置 (世界坐标)
         uniform vec3 probeBoxMin; // 房间的最小边界 (世界坐标)
         uniform vec3 probeBoxMax; // 房间的最大边界 (世界坐标)
+
+        // 用于在函数间传递 Triplanar 计算结果
+        struct TriplanarData {
+            vec2 uvX;
+            vec2 uvY;
+            vec2 uvZ;
+            vec3 blend;
+        };
 
         // 平行光定义
         struct DirLight {
@@ -139,7 +183,6 @@ void Renderer::init() {
         uniform bool isDebug;
 
         uniform vec3 viewPos;
-        uniform Material material;
         
         uniform DirLight dirLights[NR_DIR_LIGHTS];
         uniform int dirLightCount;
@@ -150,7 +193,7 @@ void Renderer::init() {
         uniform SpotLight spotLights[NR_SPOT_LIGHTS];
         uniform int spotLightCount;
 
-        // --- CSM (平行光) 阴影 Uniforms ---
+        // CSM (平行光) 阴影
         uniform sampler2DArrayShadow shadowMap; 
         // 假设最大 4 个灯 * 6 层级联 = 24 个矩阵
         // 为安全起见定义 32
@@ -159,16 +202,113 @@ void Renderer::init() {
         uniform int cascadeCount;
         uniform float shadowBias;
 
-        // --- 点光源阴影 Uniforms ---
+        // 点光源阴影
         uniform samplerCube pointShadowMaps[NR_POINT_SHADOWS];
         uniform float pointShadowFarPlanes[NR_POINT_SHADOWS];
+
+        const float PI = 3.14159265359;
+
+        // 1. 法线分布函数 (NDF) - GGX Trowbridge-Reitz
+        // 决定了高光的大小和形状 (Roughness 越小，光斑越集中)
+        float DistributionGGX(vec3 N, vec3 H, float roughness)
+        {
+            float a = roughness * roughness;
+            float a2 = a * a;
+            float NdotH = max(dot(N, H), 0.0);
+            float NdotH2 = NdotH * NdotH;
+
+            float nom   = a2;
+            float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+            denom = PI * denom * denom;
+
+            return nom / max(denom, 0.0000001); // 防止除零
+        }
+
+        // 2. 几何遮蔽函数 (Geometry) - Schlick-GGX
+        // 模拟粗糙表面的微观自遮挡 (Roughness 越大，越暗)
+        float GeometrySchlickGGX(float NdotV, float roughness)
+        {
+            // 对于直接光照，k 取值如下：
+            float r = (roughness + 1.0);
+            float k = (r*r) / 8.0;
+
+            float nom   = NdotV;
+            float denom = NdotV * (1.0 - k) + k;
+
+            return nom / max(denom, 0.0000001);
+        }
+
+        float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness)
+        {
+            float NdotV = max(dot(N, V), 0.0);
+            float NdotL = max(dot(N, L), 0.0);
+            float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+            float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+
+            return ggx1 * ggx2;
+        }
+
+        // 3. 菲涅尔方程 (Fresnel) - Schlick 近似
+        // 决定了反射光和折射光(漫反射)的比例
+        // F0: 基础反射率 (非金属0.04, 金属为 albedo)
+        vec3 FresnelSchlick(float cosTheta, vec3 F0)
+        {
+            return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+        }
+
+        // 4. 针对 IBL 的菲涅尔函数 (加入粗糙度影响)
+        // 越粗糙的表面，边缘的菲涅尔反射越弱
+        vec3 FresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness)
+        {
+            return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+        }
+        
+        // 5. 统一的 PBR 计算核心
+        // 输入：光方向L, 视线V, 法线N, 光照强度Radiance, 材质F0, 材质属性
+        vec3 CalculatePBR_Lo(vec3 L, vec3 V, vec3 N, vec3 radiance, vec3 F0, vec3 albedo, float roughness, float metallic)
+        {
+            vec3 H = normalize(V + L); // 半程向量
+
+            // Cook-Torrance BRDF
+            float NDF = DistributionGGX(N, H, roughness);   
+            float G   = GeometrySmith(N, V, L, roughness);      
+            vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
+           
+            vec3 numerator    = NDF * G * F; 
+            float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001; // +0.0001 防止除零
+            vec3 specular = numerator / denominator;
+            
+            // kS 是菲涅尔反射部分 (即 F)
+            vec3 kS = F;
+            // kD 是剩下的漫反射部分 (能量守恒: 入射光 - 反射光)
+            vec3 kD = vec3(1.0) - kS;
+            // 金属没有漫反射 (被自由电子吸收)，所以乘以 (1 - metallic)
+            kD *= 1.0 - metallic;	  
+
+            // 最终出射光 Lo = (漫反射 + 镜面反射) * 辐射率 * cosTheta
+            float NdotL = max(dot(N, L), 0.0);
+            
+            return (kD * albedo / PI + specular) * radiance * NdotL;
+        }
+
+        // 6. 环境光 BRDF 近似计算 (替代 BRDF LUT 贴图)
+        // 这是 Karis (Epic Games) 提出的拟合公式，极其经典
+        vec3 EnvBRDFApprox(vec3 specularColor, float roughness, float NdotV)
+        {
+            const vec4 c0 = vec4(-1, -0.0275, -0.572, 0.022);
+            const vec4 c1 = vec4(1, 0.0425, 1.04, -0.04);
+            vec4 r = roughness * c0 + c1;
+            float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+            vec2 AB = vec2(-1.04, 1.04) * a004 + r.zw;
+            return specularColor * AB.x + AB.y;
+        }
 
         // 函数声明
         vec4 getTriplanarSample(vec3 worldPos, vec3 normal);
 
-        vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir, vec3 albedo, float shadow);
-        vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 albedo, float shadow);
-        vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 albedo);
+        void CalcDirLight(DirLight light, vec3 N, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum);
+        void CalcPointLight(PointLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum);
+        void CalcSpotLight(SpotLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, inout vec3 diffAccum, inout vec3 specAccum);
 
         vec3 BoxProjectedCubemapDirection(vec3 worldPos, vec3 worldRefDir, vec3 pPos, vec3 boxMin, vec3 boxMax);
 
@@ -177,176 +317,197 @@ void Renderer::init() {
 
         float GetAttenuation(float distance, float range);
 
+        TriplanarData CalcTriplanarData(vec3 position, vec3 normal);
+        vec4 SampleTriplanar(sampler2D theMap, TriplanarData data);
+        vec3 SampleTriplanarNormal(sampler2D normMap, TriplanarData data, vec3 worldNormal);
+
 		// 获取法线辅助函数
 		vec3 getNormal() {
-            // 归一化插值后的法线
             vec3 n = normalize(Normal);
-            // 只有当物体明确开启了双面渲染(isDoubleSided == true)，
-            // 并且我们正在渲染背面(!gl_FrontFacing)时，才反转法线。
-            // 对于普通的球体/立方体，这段逻辑将被跳过，从而避免了 macOS 上的误判问题。
-            if (isDoubleSided && !gl_FrontFacing) {
-                n = -n; 
-            }
+            if (isDoubleSided && !gl_FrontFacing) n = -n; 
             return n;
+        }
+
+        // ACES Tone Mapping
+        vec3 ACESFilm(vec3 x) {
+            float a = 2.51f;
+            float b = 0.03f;
+            float c = 2.43f;
+            float d = 0.59f;
+            float e = 0.14f;
+            return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
         }
         
         void main() {
             vec3 norm = getNormal();
-            vec3 baseDiffuse = material.diffuse;
+
+            TriplanarData triData;
+            if (useTriplanar) {
+                // 使用 LocalPos 保证纹理随物体移动
+                triData = CalcTriplanarData(LocalPos, norm); 
+            }
+
+            vec3 albedoColor = material.albedo;
 
             // 基础纹理采样
             if (hasDiffuseMap) {
                 vec4 texColor;
-                // 根据开关选择采样方式
                 if (useTriplanar) {
-                    texColor = getTriplanarSample(LocalPos, norm);
+                    texColor = SampleTriplanar(diffuseMap, triData);
                 } else {
                     texColor = texture(diffuseMap, TexCoord);
                 }
-                baseDiffuse = texColor.rgb * material.diffuse; 
+                // sRGB 矫正
+                texColor.rgb = pow(texColor.rgb, vec3(2.2)); 
+                albedoColor = texColor.rgb * material.albedo;
+            }
+
+            if (hasNormalMap) {
+                if (useTriplanar) {
+                    // 使用专门的 Triplanar 法线混合函数
+                    // 注意：这里传入的是几何法线 Normal (大写的)，不是 TBN 计算出的
+                    norm = SampleTriplanarNormal(normalMap, triData, normalize(Normal));
+                } else {
+                    // 标准 UV 法线 (使用 getNormal 里的逻辑，可以直接把代码搬过来或保持原样)
+                    // ... 之前的 TBN 逻辑 ...
+                    vec3 rawNormal = texture(normalMap, TexCoord).rgb;
+                    if (flipNormalY) rawNormal.g = 1.0 - rawNormal.g;
+                    vec3 tangentNormal = rawNormal * 2.0 - 1.0;
+                    tangentNormal.xy *= normalStrength;
+                    norm = normalize(TBN * normalize(tangentNormal));
+                    if (isDoubleSided && !gl_FrontFacing) norm = -norm; 
+                }
+            } else {
+                // 如果没有贴图，确保 norm 已经处理了双面渲染
+                if (isDoubleSided && !gl_FrontFacing) norm = -norm; 
             }
 
             // Unlit 模式直接返回
             if (isUnlit) {
-                FragColor = vec4(baseDiffuse, 1.0); 
+                FragColor = vec4(albedoColor, 1.0); 
                 return;
             }
             
             vec3 viewDir = normalize(viewPos - FragPos);
-            
-            // 计算标准 Phong 光照
-            // 先计算全局基础环境光
-            // 我们可以取一个固定的环境光颜色，或者取第一个平行光的颜色作为环境基调
-            // 这里为了简单，我们假设环境光是白色的微弱光 (0.02 强度) * 材质的环境光系数
-            vec3 ambient = vec3(0.02) * material.ambient;
-            
-            // 如果有平行光，我们可以用第一个平行光的颜色来影响环境光，稍微自然一点（可选）
-            if (dirLightCount > 0) {
-                ambient = dirLights[0].color * 0.05 * material.ambient; 
-            }
 
-            // 初始化 result 为环境光
-            vec3 result = ambient;
+            // ================= PBR 参数准备 =================
+            // F0: 基础反射率 (0度角的反射率)
+            // 绝缘体(非金属) F0 约为 0.04
+            // 导体(金属) F0 为自身的 albedo 颜色
+            vec3 F0 = vec3(0.04); 
+            F0 = mix(F0, albedoColor, material.metallic);
+            // ==============================================
 
-            // 循环计算所有平行光
+            // 分离 Diffuse 和 Specular 累加器
+            vec3 directDiffuse = vec3(0.0);
+            vec3 directSpecular = vec3(0.0);
+
+            // 1. 计算所有直接光照
             for(int i = 0; i < dirLightCount; i++) {
                 float shadow = 1.0;
-                
-                // 如果该光源启用了阴影 (index >= 0)
                 if (dirLights[i].shadowIndex >= 0) {
                     vec3 lightDir = normalize(-dirLights[i].direction);
-                    // 传入该光源在纹理数组中的起始层级
                     shadow = ShadowCalculation(FragPos, norm, lightDir, ClipSpaceZ, dirLights[i].shadowIndex);
                 }
-                
-                // 传入 shadow 因子
-                result += CalcDirLight(dirLights[i], norm, viewDir, baseDiffuse, shadow); 
+                CalcDirLight(dirLights[i], norm, viewDir, albedoColor, F0, shadow, directDiffuse, directSpecular);
             }
             
-            // 点光源计算
             for(int i = 0; i < pointLightCount; i++) {
                 float shadow = 1.0;
                 if (pointLights[i].shadowIndex >= 0) {
                     float rawShadow = CalcPointShadow(FragPos, pointLights[i].position, pointLights[i].shadowIndex, pointLights[i].range, pointLights[i].shadowRadius, pointLights[i].shadowBias);
-                    
-                    // 应用 Shadow Strength (混合: 1.0 = 纯影, 0.0 = 无影)
-                    // 如果 shadow 是 0 (全黑), strength 是 0.8, 结果应为 0.2
-                    // 公式: 最终阴影因子 = mix(1.0, rawShadow, strength);
                     shadow = mix(1.0, rawShadow, pointLights[i].shadowStrength);
                 }
-                result += CalcPointLight(pointLights[i], norm, FragPos, viewDir, baseDiffuse, shadow);
+                CalcPointLight(pointLights[i], norm, FragPos, viewDir, albedoColor, F0, shadow, directDiffuse, directSpecular);
             }
-                
+            
             for(int i = 0; i < spotLightCount; i++)
-                result += CalcSpotLight(spotLights[i], norm, FragPos, viewDir, baseDiffuse);
-
-            // 3. 环境反射与折射
+                CalcSpotLight(spotLights[i], norm, FragPos, viewDir, albedoColor, F0, directDiffuse, directSpecular);
+            
+            // 2. 环境光 (IBL)
+            vec3 ambientDiffuse = vec3(0.0);
+            vec3 ambientSpecular = vec3(0.0);
+            
             if (hasEnvMap) {
-                vec3 I = normalize(FragPos - viewPos); // 视线向量 I
-                vec3 N = norm;                         // 法线 N
-
-                // ------------------------------------------
-                // 1. 计算菲涅尔系数 (Fresnel)
-                // ------------------------------------------
-                // 描述：视线与法线越垂直(边缘)，反射越强(F接近1)；越平行(中心)，折射越强(F接近0)
-                // F0 是基础反射率：
-                //   - 水/玻璃等非金属 (Dielectric) 约为 0.04
-                //   - 金属 (Metal) 约为 material.diffuse 颜色本身
-                // 我们用 reflectivity 参数来控制这个 F0
-                float F0_val = mix(0.04, 1.0, material.reflectivity);
-                vec3 F0 = vec3(F0_val);
+                // Diffuse IBL
+                vec3 irradiance = textureLod(envMap, norm, 8.0).rgb; 
+                vec3 kS = FresnelSchlickRoughness(max(dot(norm, viewDir), 0.0), F0, material.roughness);
+                vec3 kD = 1.0 - kS;
+                kD *= 1.0 - material.metallic;
                 
-                // Schlick 近似公式
-                float cosTheta = clamp(dot(N, -I), 0.0, 1.0);
-                vec3 F = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+                ambientDiffuse = kD * irradiance * albedoColor * iblIntensity;
 
-                // ------------------------------------------
-                // 2. 计算反射 (Reflection)
-                // ------------------------------------------
-                vec3 reflectColor = vec3(0.0);
-                {
-                    vec3 R = reflect(I, N);
-                    // 应用视差校正
-                    vec3 correctedR = BoxProjectedCubemapDirection(FragPos, R, probePos, probeBoxMin, probeBoxMax);
-                    reflectColor = texture(envMap, correctedR).rgb;
-                }
+                // Specular IBL
+                vec3 R = reflect(-viewDir, norm);
+                vec3 correctedR = BoxProjectedCubemapDirection(FragPos, R, probePos, probeBoxMin, probeBoxMax);
+                float MAX_LOD = 4.0;
+                vec3 prefilteredColor = textureLod(envMap, correctedR, material.roughness * MAX_LOD).rgb;
+                vec3 specularFactor = EnvBRDFApprox(F0, material.roughness, max(dot(norm, viewDir), 0.0));
+                
+                ambientSpecular = prefilteredColor * specularFactor * iblIntensity;
+            } else {
+                ambientDiffuse = vec3(0.03) * albedoColor * material.ao; 
+            }
+            
+            // 3. 组合 PBR 不透明部分
+            vec3 opaqueColor = (ambientDiffuse + directDiffuse) * material.ao + (ambientSpecular + directSpecular);
+            
+            // 4. 玻璃/折射逻辑 (关键修改)
+            vec3 finalColor = opaqueColor;
 
-                // ------------------------------------------
-                // 3. 计算折射 + 色散 (Refraction + Dispersion)
-                // ------------------------------------------
+            if (material.transparency > 0.001) 
+            {
+                // 计算玻璃的 Fresnel (使用用户指定的 Reflectivity 微调 F0)
+                float glassF0 = mix(0.0, 0.5, material.reflectivity); // 注意：这里范围改小了
+                // 或者更物理一点，假设玻璃 F0 固定 0.04，Reflectivity 只控制额外增强
+                vec3 F0_Glass = vec3(0.04); 
+                
+                float cosTheta = clamp(dot(norm, -normalize(FragPos - viewPos)), 0.0, 1.0);
+                vec3 F = FresnelSchlick(cosTheta, F0_Glass);
+                
+                // 用户 reflectivity 额外增强 Fresnel 效果 (艺术控制)
+                F += material.reflectivity * 0.5;
+                F = clamp(F, 0.0, 1.0);
+
+                // 折射与反射
                 vec3 refractColor = vec3(0.0);
-                if (material.transparency > 0.01) {
-                    // 基础折射率比
-                    float k = (material.refractionIndex < 1.0) ? 1.0 : material.refractionIndex;
-                    float ratio = 1.00 / k;
-                    
-                    // [色散核心]：为 R, G, B 通道使用微小差异的折射率
-                    // 0.01 ~ 0.02 的偏移量通常能产生很好的钻石/厚玻璃效果
-                    float dispersion = 0.02; 
-                    
-                    vec3 R_r = refract(I, N, ratio * (1.0 - dispersion)); // 红光折射少
-                    vec3 R_g = refract(I, N, ratio);                      // 绿光居中
-                    vec3 R_b = refract(I, N, ratio * (1.0 + dispersion)); // 蓝光折射多
+                vec3 reflectColor = vec3(0.0);
 
-                    // 分别对 R, G, B 进行视差校正采样
-                    vec3 correctedR_r = BoxProjectedCubemapDirection(FragPos, R_r, probePos, probeBoxMin, probeBoxMax);
-                    vec3 correctedR_g = BoxProjectedCubemapDirection(FragPos, R_g, probePos, probeBoxMin, probeBoxMax);
-                    vec3 correctedR_b = BoxProjectedCubemapDirection(FragPos, R_b, probePos, probeBoxMin, probeBoxMax);
-
-                    // 分别采样并组合
-                    float r = texture(envMap, correctedR_r).r;
-                    float g = texture(envMap, correctedR_g).g;
-                    float b = texture(envMap, correctedR_b).b;
+                if (hasEnvMap) {
+                    // Refract
+                    float k = max(material.refractionIndex, 1.0);
+                    float ratio = 1.0 / k;
+                    vec3 I = normalize(FragPos - viewPos);
                     
-                    refractColor = vec3(r, g, b);
+                    // 简化折射采样 (不做色散了，为了性能和清晰度)
+                    vec3 R_refract = refract(I, norm, ratio);
+                    vec3 corrR_refract = BoxProjectedCubemapDirection(FragPos, R_refract, probePos, probeBoxMin, probeBoxMax);
+                    refractColor = textureLod(envMap, corrR_refract, 0.0).rgb * iblIntensity;
+
+                    // Reflect
+                    vec3 R_reflect = reflect(I, norm);
+                    vec3 corrR_reflect = BoxProjectedCubemapDirection(FragPos, R_reflect, probePos, probeBoxMin, probeBoxMax);
+                    reflectColor = textureLod(envMap, corrR_reflect, material.roughness * 4.0).rgb * iblIntensity;
                 }
 
-                // ------------------------------------------
-                // 4. 最终物理混合 (Mix based on Fresnel)
-                // ------------------------------------------
-                // 如果物体是透明的 (transparency > 0)
-                // 最终颜色 = 反射 * F + 折射 * (1 - F)
-                // 这种混合方式保证了能量守恒：光线要么反射走，要么折射进去
+                vec3 glassBody = mix(refractColor, reflectColor, F);
                 
-                vec3 glassColor = mix(refractColor, reflectColor, F);
+                // [关键] 混合: 玻璃本体 + 直接光高光 (Sun Specular)
+                // 即使玻璃是透明的，太阳照上去也应该有亮斑 (directSpecular)
+                // 而 diffuse 部分被 transparency 替换掉了
                 
-                // 最后，我们要把这个“玻璃计算结果”和物体原本的颜色(Phong光照)混合
-                // 如果 transparency = 1.0 (全透明)，我们只显示 glassColor
-                // 如果 transparency = 0.0 (不透明)，我们主要显示 result (Phong光照) + 表面反射
-                
-                if (material.transparency > 0.01) {
-                    // 全透明模式：忽略漫反射本身，只保留高光
-                    // (玻璃本身几乎没有漫反射，只有镜面反射和折射)
-                    // 我们保留一点 result 里的 specular 高光
-                    result = glassColor + (result * 0.1); // 这里的 0.1 是为了防止全黑，保留一点环境光感
-                } else {
-                    // 不透明模式 (金属)：简单的反射叠加
-                    // 金属也是由 Fresnel 控制的
-                    result = mix(result, reflectColor, material.reflectivity * F); 
-                }
+                vec3 glassResult = glassBody + directSpecular;
+
+                finalColor = mix(opaqueColor, glassResult, material.transparency);
             }
 
-            FragColor = vec4(result, 1.0);
+            // 5. Tone Mapping (ACES)
+            finalColor = ACESFilm(finalColor);
+            
+            // 6. Gamma
+            finalColor = pow(finalColor, vec3(1.0/2.2));
+
+            FragColor = vec4(finalColor, 1.0);
 
             // Debug Cascade Layers (仅显示第一个开启阴影的光源的层级)
             if (isDebug) {
@@ -368,81 +529,200 @@ void Renderer::init() {
             }
         }
 
-        // --- 函数实现 ---
+        vec2 rotateUV(vec2 uv, float angleDeg) {
+            vec2 center = vec2(0.5);
+            uv -= center;
+            float rad = radians(angleDeg);
+            float s = sin(rad);
+            float c = cos(rad);
+            mat2 rotMat = mat2(c, -s, s, c);
+            uv = rotMat * uv;
+            uv += center;
+            return uv;
+        }
 
-        vec4 getTriplanarSample(vec3 position, vec3 normal) {
-            // 1. 计算混合权重
-            // 使用幂函数 (pow) 增加对比度，让主轴方向的纹理更清晰，侧面的纹理快速衰减
-            // 这里的 4.0 是“锐度”，数值越大，交界处越硬；数值越小，交界处越模糊
+        TriplanarData CalcTriplanarData(vec3 position, vec3 normal) {
+            TriplanarData data;
+            
+            // 1. 权重
             vec3 blending = abs(normal);
             blending = pow(blending, vec3(4.0)); 
-            
-            // 归一化权重，确保加起来等于 1
             float b = (blending.x + blending.y + blending.z);
-            blending /= vec3(b, b, b);
+            data.blend = blending / vec3(b, b, b);
 
-            // 2. [核心修改] 使用传入的 position (将是 LocalPos) 计算 UV
-            vec2 uvX = position.zy * triplanarScale;
-            vec2 uvY = position.xz * triplanarScale;
-            vec2 uvZ = position.xy * triplanarScale;
+            // 2. 基础投影
+            data.uvX = position.zy * triplanarScale + 0.5;
+            data.uvY = position.xz * triplanarScale + 0.5;
+            data.uvZ = position.xy * triplanarScale + 0.5;
 
-            // 3. 采样三次
-            vec4 colX = texture(diffuseMap, uvX);
-            vec4 colY = texture(diffuseMap, uvY);
-            vec4 colZ = texture(diffuseMap, uvZ);
+            // 3. 旋转 (基于轴向)
+            // X轴
+            bool isPosX = normal.x > 0.0;
+            float rotX = isPosX ? triRotPos.x : triRotNeg.x;
+            if (rotX > 0.1) data.uvX = rotateUV(data.uvX, rotX);
+            
+            // Y轴
+            bool isPosY = normal.y > 0.0;
+            float rotY = isPosY ? triRotPos.y : triRotNeg.y;
+            if (rotY > 0.1) data.uvY = rotateUV(data.uvY, rotY);
 
-            // 4. 混合结果
-            return colX * blending.x + colY * blending.y + colZ * blending.z;
+            // Z轴
+            bool isPosZ = normal.z > 0.0;
+            float rotZ = isPosZ ? triRotPos.z : triRotNeg.z;
+            if (rotZ > 0.1) data.uvZ = rotateUV(data.uvZ, rotZ);
+
+            // 4. 翻转 (基于轴向)
+            bool flipX = isPosX ? (triFlipPos.x > 0.5) : (triFlipNeg.x > 0.5);
+            if (flipX) data.uvX.x = -data.uvX.x;
+
+            bool flipY = isPosY ? (triFlipPos.y > 0.5) : (triFlipNeg.y > 0.5);
+            if (flipY) data.uvY.x = -data.uvY.x;
+
+            bool flipZ = isPosZ ? (triFlipPos.z > 0.5) : (triFlipNeg.z > 0.5);
+            if (flipZ) data.uvZ.x = -data.uvZ.x;
+
+            return data;
         }
 
-        vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir, vec3 albedo, float shadow) {
-            vec3 lightDir = normalize(-light.direction);
-            // 漫反射
-            float diff = max(dot(normal, lightDir), 0.0);
-            // 镜面反射 (Blinn-Phong)
-            vec3 halfwayDir = normalize(lightDir + viewDir);
-            float spec = pow(max(dot(normal, halfwayDir), 0.0), material.shininess);
-            // 合并
-            vec3 diffuse = light.color * light.intensity * diff * albedo * shadow;
-            vec3 specular = light.color * light.intensity * spec * material.specular * shadow;
-            return (diffuse + specular);
+        // --- 函数实现 ---
+
+        vec4 SampleTriplanar(sampler2D theMap, TriplanarData data) {
+            vec4 colX = texture(theMap, data.uvX);
+            vec4 colY = texture(theMap, data.uvY);
+            vec4 colZ = texture(theMap, data.uvZ);
+            return colX * data.blend.x + colY * data.blend.y + colZ * data.blend.z;
         }
 
-        vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 albedo, float shadow) {
-            vec3 lightDir = normalize(light.position - fragPos);
-            // 衰减
-            float distance = length(light.position - fragPos);
+        vec3 SampleTriplanarNormal(sampler2D normMap, TriplanarData data, vec3 worldNormal) {
+            // 1. 采样
+            vec3 nX = texture(normMap, data.uvX).xyz;
+            vec3 nY = texture(normMap, data.uvY).xyz;
+            vec3 nZ = texture(normMap, data.uvZ).xyz;
+
+            // 2. 解包 (0~1 -> -1~1) 并处理翻转
+            if (flipNormalY) {
+                nX.g = 1.0 - nX.g; nY.g = 1.0 - nY.g; nZ.g = 1.0 - nZ.g;
+            }
+            nX = nX * 2.0 - 1.0;
+            nY = nY * 2.0 - 1.0;
+            nZ = nZ * 2.0 - 1.0;
+
+            // 应用强度
+            nX.xy *= normalStrength; nY.xy *= normalStrength; nZ.xy *= normalStrength;
+            // 重新归一化是必要的，因为修改强度后长度变了
+            nX = normalize(nX); nY = normalize(nY); nZ = normalize(nZ);
+
+            // 3. 转换到世界空间 (修正部分)
+            // 这里的逻辑是：
+            // 切线空间的 Z (n.z) 对应 世界空间的 几何法线方向 (X, Y 或 Z)
+            // 切线空间的 X (n.x) 对应 切线 (Tangent)
+            // 切线空间的 Y (n.y) 对应 副切线 (Bitangent)
+            
+            // X面投影 (ZY平面 UV): U->Z(Tangent), V->Y(Bitangent), Face->X
+            // 修正：将 nX.z 放入 X 分量
+            vec3 worldNormalX = vec3(nX.z, nX.y, nX.x); 
+
+            // Y面投影 (XZ平面 UV): U->X(Tangent), V->Z(Bitangent), Face->Y
+            // 修正：将 nY.z 放入 Y 分量
+            vec3 worldNormalY = vec3(nY.x, nY.z, nY.y); 
+
+            // Z面投影 (XY平面 UV): U->X(Tangent), V->Y(Bitangent), Face->Z
+            // 修正：将 nZ.z 放入 Z 分量
+            vec3 worldNormalZ = vec3(nZ.x, nZ.y, nZ.z);
+
+            // 4. 处理背面翻转
+            // 如果几何法线指向负方向，我们需要翻转重构出的法线的主轴分量
+            // 这样才能保证法线贴图的 Z 依然指向“表面外侧”
+            if (worldNormal.x < 0.0) worldNormalX.x = -worldNormalX.x;
+            if (worldNormal.y < 0.0) worldNormalY.y = -worldNormalY.y;
+            if (worldNormal.z < 0.0) worldNormalZ.z = -worldNormalZ.z;
+
+            // 5. 混合
+            vec3 blendedNormal = worldNormalX * data.blend.x + 
+                                worldNormalY * data.blend.y + 
+                                worldNormalZ * data.blend.z;
+            
+            return normalize(blendedNormal);
+        }
+
+        void CalcDirLight(DirLight light, vec3 N, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum) {
+            vec3 L = normalize(-light.direction);
+            vec3 H = normalize(V + L);
+            float NdotL = max(dot(N, L), 0.0);
+            
+            // Radiance
+            vec3 radiance = light.color * light.intensity * shadow;
+
+            // Cook-Torrance
+            float NDF = DistributionGGX(N, H, material.roughness);   
+            float G   = GeometrySmith(N, V, L, material.roughness);      
+            vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
+           
+            vec3 numerator    = NDF * G * F; 
+            float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
+            vec3 specular = numerator / denominator;
+            
+            vec3 kS = F;
+            vec3 kD = vec3(1.0) - kS;
+            kD *= 1.0 - material.metallic;	  
+
+            // 累加
+            diffAccum += (kD * albedo / PI) * radiance * NdotL;
+            specAccum += specular * radiance * NdotL;
+        }
+
+        void CalcPointLight(PointLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum) {
+            vec3 L = normalize(light.position - pos);
+            vec3 H = normalize(V + L);
+            float distance = length(light.position - pos);
             float attenuation = GetAttenuation(distance, light.range);
-            // 漫反射
-            float diff = max(dot(normal, lightDir), 0.0);
-            // 镜面反射
-            vec3 halfwayDir = normalize(lightDir + viewDir);
-            float spec = pow(max(dot(normal, halfwayDir), 0.0), material.shininess);
-            // 合并
-            vec3 diffuse = light.color * light.intensity * diff * attenuation * albedo * shadow;
-            vec3 specular = light.color * light.intensity * spec * material.specular * attenuation * shadow;
-            return (diffuse + specular);
+            float NdotL = max(dot(N, L), 0.0);
+
+            vec3 radiance = light.color * light.intensity * attenuation * shadow;
+
+            float NDF = DistributionGGX(N, H, material.roughness);   
+            float G   = GeometrySmith(N, V, L, material.roughness);      
+            vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
+           
+            vec3 numerator    = NDF * G * F; 
+            float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
+            vec3 specular = numerator / denominator;
+            
+            vec3 kS = F;
+            vec3 kD = vec3(1.0) - kS;
+            kD *= 1.0 - material.metallic;	  
+
+            diffAccum += (kD * albedo / PI) * radiance * NdotL;
+            specAccum += specular * radiance * NdotL;
         }
 
-        vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 albedo) {
-            vec3 lightDir = normalize(light.position - fragPos);
-            // 衰减
-            float distance = length(light.position - fragPos);
+        void CalcSpotLight(SpotLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, inout vec3 diffAccum, inout vec3 specAccum) {
+            vec3 L = normalize(light.position - pos);
+            vec3 H = normalize(V + L);
+            float distance = length(light.position - pos);
             float attenuation = GetAttenuation(distance, light.range);
-            // 聚光强度 (Soft edges)
-            float theta = dot(lightDir, normalize(-light.direction)); 
+            float NdotL = max(dot(N, L), 0.0);
+
+            float theta = dot(L, normalize(-light.direction)); 
             float epsilon = light.cutOff - light.outerCutOff;
             float intensity = clamp((theta - light.outerCutOff) / epsilon, 0.0, 1.0);
+
+            vec3 radiance = light.color * light.intensity * attenuation * intensity;
+
+            float NDF = DistributionGGX(N, H, material.roughness);   
+            float G   = GeometrySmith(N, V, L, material.roughness);      
+            vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
+           
+            vec3 numerator    = NDF * G * F; 
+            float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
+            vec3 specular = numerator / denominator;
             
-            // 漫反射
-            float diff = max(dot(normal, lightDir), 0.0);
-            // 镜面反射
-            vec3 halfwayDir = normalize(lightDir + viewDir);
-            float spec = pow(max(dot(normal, halfwayDir), 0.0), material.shininess);
-            // 合并
-            vec3 diffuse = light.color * light.intensity * diff * attenuation * intensity * albedo;
-            vec3 specular = light.color * light.intensity * spec * material.specular * attenuation * intensity;
-            return (diffuse + specular);
+            vec3 kS = F;
+            vec3 kD = vec3(1.0) - kS;
+            kD *= 1.0 - material.metallic;	  
+
+            diffAccum += (kD * albedo / PI) * radiance * NdotL;
+            specAccum += specular * radiance * NdotL;
         }
 
         // Box Projection
@@ -689,6 +969,17 @@ void Renderer::init() {
     _mainShader->attachVertexShader(vsCode);
     _mainShader->attachFragmentShader(fsCode);
     _mainShader->link();
+
+    // 预设纹理槽位，防止采样器冲突
+    _mainShader->use();
+    _mainShader->setUniformInt("diffuseMap", 0);  // Slot 0: Albedo
+    _mainShader->setUniformInt("normalMap", 1);   // Slot 1: Normal
+    _mainShader->setUniformInt("shadowMap", 2);   // Slot 2: CSM Array
+    _mainShader->setUniformInt("envMap", 3);      // Slot 3: IBL Cubemap (改到3，避开NormalMap)
+
+    // Slot 4,5,6,7 用于点光源阴影
+    int pointShadowSamplers[4] = {4, 5, 6, 7};
+    glUniform1iv(glGetUniformLocation(_mainShader->getHandle(), "pointShadowMaps"), 4, pointShadowSamplers);
 
     // =============================================================
     // 1. 无限网格 Shader (Unity 风格)
@@ -1164,7 +1455,7 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         
         // 顺便更新 Gizmo 颜色 (可选)
         if (auto mesh = light->owner->getComponent<MeshComponent>()) {
-            if (mesh->isGizmo) mesh->material.diffuse = light->color;
+            if (mesh->isGizmo) mesh->material.albedo = light->color;
         }
         countPoint++;
     }
@@ -1186,7 +1477,7 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         _mainShader->setUniformFloat(base + ".range", light->range);
         
         if (auto mesh = light->owner->getComponent<MeshComponent>()) {
-            if (mesh->isGizmo) mesh->material.diffuse = light->color;
+            if (mesh->isGizmo) mesh->material.albedo = light->color;
         }
         countSpot++;
     }
@@ -1224,13 +1515,26 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, 0);
         }
+
+        if (meshComp->normalMap) {
+            meshComp->normalMap->bind(1); // 绑定到 Slot 1
+            _mainShader->setUniformBool("hasNormalMap", true);
+            _mainShader->setUniformFloat("normalStrength", meshComp->normalStrength);
+            _mainShader->setUniformBool("flipNormalY", meshComp->flipNormalY);
+        } else {
+            _mainShader->setUniformBool("hasNormalMap", false);
+        }
         
         _mainShader->setUniformBool("isUnlit", meshComp->isGizmo);
         _mainShader->setUniformBool("isDoubleSided", meshComp->doubleSided);
-        _mainShader->setUniformVec3("material.ambient", meshComp->material.ambient);
-        _mainShader->setUniformVec3("material.diffuse", meshComp->material.diffuse);
-        _mainShader->setUniformVec3("material.specular", meshComp->material.specular);
-        _mainShader->setUniformFloat("material.shininess", meshComp->material.shininess);
+        // _mainShader->setUniformVec3("material.ambient", meshComp->material.ambient);
+        // _mainShader->setUniformVec3("material.diffuse", meshComp->material.diffuse);
+        // _mainShader->setUniformVec3("material.specular", meshComp->material.specular);
+        // _mainShader->setUniformFloat("material.shininess", meshComp->material.shininess);
+        _mainShader->setUniformVec3("material.albedo", meshComp->material.albedo);
+        _mainShader->setUniformFloat("material.metallic", meshComp->material.metallic);
+        _mainShader->setUniformFloat("material.roughness", meshComp->material.roughness);
+        _mainShader->setUniformFloat("material.ao", meshComp->material.ao);
 
         _mainShader->setUniformFloat("material.reflectivity", meshComp->material.reflectivity);
         _mainShader->setUniformFloat("material.refractionIndex", meshComp->material.refractionIndex);
@@ -1238,15 +1542,30 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
 
         _mainShader->setUniformBool("useTriplanar", meshComp->useTriplanar);
         _mainShader->setUniformFloat("triplanarScale", meshComp->triplanarScale);
+        glm::vec3 flipPos(
+            meshComp->triFlipPosX ? 1.0f : 0.0f,
+            meshComp->triFlipPosY ? 1.0f : 0.0f,
+            meshComp->triFlipPosZ ? 1.0f : 0.0f
+        );
+        _mainShader->setUniformVec3("triFlipPos", flipPos);
+        glm::vec3 flipNeg(
+            meshComp->triFlipNegX ? 1.0f : 0.0f,
+            meshComp->triFlipNegY ? 1.0f : 0.0f,
+            meshComp->triFlipNegZ ? 1.0f : 0.0f
+        );
+        _mainShader->setUniformVec3("triFlipNeg", flipNeg);
+        glm::vec3 rotPos(meshComp->triRotPosX, meshComp->triRotPosY, meshComp->triRotPosZ);
+        _mainShader->setUniformVec3("triRotPos", rotPos);
+        glm::vec3 rotNeg(meshComp->triRotNegX, meshComp->triRotNegY, meshComp->triRotNegZ);
+        _mainShader->setUniformVec3("triRotNeg", rotNeg);
 
         auto probe = go->getComponent<ReflectionProbeComponent>();
         if (probe && probe->textureID != 0) {
             // 如果这个物体本身就是一个反射探针，我们就使用它生成的 Environment Map
-            glActiveTexture(GL_TEXTURE1);
+            glActiveTexture(GL_TEXTURE3);
             glBindTexture(GL_TEXTURE_CUBE_MAP, probe->textureID);
             
             _mainShader->setUniformBool("hasEnvMap", true);
-            _mainShader->setUniformInt("envMap", 1); // 告诉 Shader 去纹理单元 1 找
             
             // 计算并传递 Box 参数
             // 假设探针中心就是物体中心
@@ -1261,6 +1580,11 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         } else {
             _mainShader->setUniformBool("hasEnvMap", false);
         }
+
+        // [新增] IBL 强度控制
+        // 建议：如果你觉得场景太亮，这里可以传 0.5 或者 0.3
+        // 暂时硬编码为 0.5 试试，或者后续在 Inspector 里加个 Scene Settings
+        _mainShader->setUniformFloat("iblIntensity", 0.4f);
 
         // 计算 Model Matrix
         glm::mat4 modelMatrix = go->transform.getLocalMatrix();

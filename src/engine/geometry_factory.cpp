@@ -204,6 +204,8 @@ std::shared_ptr<Model> GeometryFactory::createFrustum(float topRadius, float bot
         convertToFlat(vertices, indices);
     }
 
+    computeTangents(vertices, indices);
+
     return std::make_unique<Model>(vertices, indices);
 }
 
@@ -250,6 +252,8 @@ std::shared_ptr<Model> GeometryFactory::createCube(float size)
             Vertex{glm::vec3(h, -h, h), glm::vec3(0, -1, 0), glm::vec2(1, 1)},
             Vertex{glm::vec3(-h, -h, h), glm::vec3(0, -1, 0), glm::vec2(0, 1)});
 
+    computeTangents(vertices, indices);
+
     return std::make_unique<Model>(vertices, indices);
 }
 
@@ -267,6 +271,8 @@ std::shared_ptr<Model> GeometryFactory::createPlane(float width, float depth)
             Vertex{glm::vec3(w, 0, -d), glm::vec3(0, 1, 0), glm::vec2(width, depth)}, // 右上
             Vertex{glm::vec3(-w, 0, -d), glm::vec3(0, 1, 0), glm::vec2(0, depth)}     // 左上
     );
+
+    computeTangents(vertices, indices);
 
     return std::make_unique<Model>(vertices, indices);
 }
@@ -319,6 +325,8 @@ std::shared_ptr<Model> GeometryFactory::createSphere(float radius, int stacks, i
         convertToFlat(vertices, indices);
     }
 
+    computeTangents(vertices, indices);
+
     return std::make_unique<Model>(vertices, indices);
 }
 
@@ -342,4 +350,47 @@ std::shared_ptr<Model> GeometryFactory::createPyramidFrustum(float topRadius, fl
 {
     // 棱台本质上就是 slices 很少的圆台
     return createFrustum(topRadius, bottomRadius, height, sides, useFlatShade);
+}
+
+void GeometryFactory::computeTangents(std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices)
+{
+    // 1. 初始化所有切线为 0
+    for (auto& v : vertices) {
+        v.tangent = glm::vec3(0.0f);
+    }
+
+    // 2. 遍历所有三角形，累加切线
+    for (size_t i = 0; i < indices.size(); i += 3)
+    {
+        Vertex& v0 = vertices[indices[i]];
+        Vertex& v1 = vertices[indices[i+1]];
+        Vertex& v2 = vertices[indices[i+2]];
+
+        glm::vec3 edge1 = v1.position - v0.position;
+        glm::vec3 edge2 = v2.position - v0.position;
+
+        glm::vec2 deltaUV1 = v1.texCoord - v0.texCoord;
+        glm::vec2 deltaUV2 = v2.texCoord - v0.texCoord;
+
+        float f = 1.0f / (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y);
+
+        glm::vec3 tangent;
+        tangent.x = f * (deltaUV2.y * edge1.x - deltaUV1.y * edge2.x);
+        tangent.y = f * (deltaUV2.y * edge1.y - deltaUV1.y * edge2.y);
+        tangent.z = f * (deltaUV2.y * edge1.z - deltaUV1.y * edge2.z);
+
+        // 累加到三个顶点上 (平滑切线)
+        v0.tangent += tangent;
+        v1.tangent += tangent;
+        v2.tangent += tangent;
+    }
+
+    // 3. 正交化 (Gram-Schmidt) 并归一化
+    for (auto& v : vertices)
+    {
+        // 重新正交化，确保切线垂直于法线
+        v.tangent = glm::normalize(v.tangent - v.normal * glm::dot(v.normal, v.tangent));
+        
+        // (可选) 这里可以计算 Bitangent 的手性并存储到 w 分量，但目前我们先只算 Tangent
+    }
 }

@@ -40,6 +40,9 @@ public:
     // 7. 多面棱台 (Prism Frustum) - 比如四棱台: topR=0.5, bottomR=1, slices=4
     static std::shared_ptr<Model> createPyramidFrustum(float topRadius, float bottomRadius, float height, int sides = 4, bool useFlatShade = false);
 
+    // 通用切线计算函数 (修改 vertices 数组的内容)
+    static void computeTangents(std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices);
+    
 private:
     static void convertToFlat(std::vector<Vertex>& vertices, std::vector<uint32_t>& indices);
 };

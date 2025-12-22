@@ -13,9 +13,10 @@ GameObject* Scene::createCube()
     auto meshComp = go->addComponent<MeshComponent>(GeometryFactory::createCube());
     
     // 初始化默认参数
-    meshComp->shapeType = MeshShapeType::Cube;
-    meshComp->params.size = 1.0f;
-    meshComp->material.diffuse = glm::vec3(0.8f);
+    meshComp->material.albedo = glm::vec3(0.8f); 
+    meshComp->material.roughness = 0.5f;
+    meshComp->material.metallic = 0.0f;
+    meshComp->material.ao = 1.0f;
 
     // 存入容器
     _gameObjects.push_back(std::unique_ptr<GameObject>(go));
@@ -33,7 +34,7 @@ GameObject* Scene::createPointLight()
     auto meshComp = go->addComponent<MeshComponent>(GeometryFactory::createSphere(0.2f), true);
     meshComp->shapeType = MeshShapeType::Sphere;
     meshComp->params.radius = 0.2f;
-    meshComp->material.diffuse = lightComp->color;
+    meshComp->material.albedo = lightComp->color;
 
     _gameObjects.push_back(std::unique_ptr<GameObject>(go));
     return go;

@@ -109,6 +109,7 @@ public:
 
     std::shared_ptr<Model> model;
     std::shared_ptr<ImageTexture2D> diffuseMap; // 漫反射贴图
+    std::shared_ptr<ImageTexture2D> normalMap; // 法线贴图
     Material material;
 
     // 是否是Gizmo (编辑器辅助物体，如灯泡图标)，渲染时不受光照影响
@@ -123,6 +124,22 @@ public:
     // Texture设置
     bool useTriplanar = false; // 是否开启三向映射
     float triplanarScale = 1.0f; // 纹理平铺缩放大小
+    bool triFlipPosX = false; 
+    bool triFlipNegX = false;
+    bool triFlipPosY = false;
+    bool triFlipNegY = false;
+    bool triFlipPosZ = false;
+    bool triFlipNegZ = false;
+    float triRotPosX = 0.0f;
+    float triRotPosY = 0.0f;
+    float triRotPosZ = 0.0f;
+    float triRotNegX = 0.0f;
+    float triRotNegY = 0.0f;
+    float triRotNegZ = 0.0f;
+
+    // 法线贴图设置
+    float normalStrength = 1.0f;
+    bool flipNormalY = false;
 
     MeshShapeType shapeType = MeshShapeType::Cube;
     MeshParams params;

@@ -6,6 +6,7 @@ struct Vertex {
     glm::vec3 position;
     glm::vec3 normal;
     glm::vec2 texCoord;
+    glm::vec3 tangent;
     Vertex() = default;
     Vertex(const glm::vec3& p, const glm::vec3 n, const glm::vec2 texC)
         : position(p), normal(n), texCoord(texC) {}

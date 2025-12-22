@@ -1,4 +1,5 @@
 #include "obj_loader.h"
+#include "geometry_factory.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -178,6 +179,10 @@ MeshData OBJLoader::load(const std::string& filepath, bool useFlatShade) {
             v2.normal = normal;
         }
     }
+
+    // 既然我们已经有了 meshData (vertices/indices)，直接借用 GeometryFactory 的算法
+    // 需要 include "geometry_factory.h"
+    GeometryFactory::computeTangents(meshData.vertices, meshData.indices);
 
     std::cout << "Loaded OBJ: " << filepath << "\n" 
               << "  Vertices: " << meshData.vertices.size() << "\n" 

@@ -4,14 +4,22 @@
 // 材质属性
 struct Material
 {
-    glm::vec3 ambient = glm::vec3(0.1f);
-    glm::vec3 diffuse = glm::vec3(0.7f);
-    glm::vec3 specular = glm::vec3(0.5f);
-    float shininess = 32.0f;
+    // --- PBR 核心参数 ---
+    glm::vec3 albedo = glm::vec3(1.0f); // 基础色 (原 diffuse)
+    float metallic = 0.0f;              // 金属度 (0=绝缘体, 1=金属)
+    float roughness = 0.5f;             // 粗糙度 (0=光滑, 1=粗糙)
+    float ao = 1.0f;                    // 环境光遮蔽 (Ambient Occlusion)
 
-    float reflectivity = 0.0f;    // 反射强度 (0.0 = 无反射, 1.0 = 全镜面)
-    float refractionIndex = 1.0f; // 折射率 (1.0 = 空气, 1.33 = 水, 1.52 = 玻璃, 2.42 = 钻石)
-    float transparency = 0.0f;    // 透明度/折射强度 (0.0 = 不透明, 1.0 = 全透明)
+    // --- 透明/玻璃高级参数 ---
+    // PBR 工作流中，F0 (反射率) 通常由 metallic 决定
+    // 但为了兼容你的玻璃效果，我们保留 IOR 和 transparency
+    float refractionIndex = 1.52f; // 折射率 (玻璃默认 1.52)
+    float transparency = 0.0f;     // 透明度 (0=不透明)
+    
+    // [兼容性保留] 
+    // 反射率 (Reflectivity) 在 PBR 中通常不需要手动调 (非金属固定0.04，金属等于Albedo)
+    // 但为了让现在的 Shader 能跑，或者作为额外的艺术控制，我们暂时保留它
+    float reflectivity = 0.5f;
 };
 
 // 平行光 (太阳光)
