@@ -67,6 +67,10 @@ struct MeshParams
 
     // OBJ
     char objPath[256] = "";
+
+    // 子网格名称过滤器
+    // 如果为空，加载整个文件；如果不为空，只加载匹配该名称的 group/object/material
+    char subMeshName[128] = "";
 };
 
 // ==========================================
@@ -110,6 +114,9 @@ public:
     std::shared_ptr<Model> model;
     std::shared_ptr<ImageTexture2D> diffuseMap; // 漫反射贴图
     std::shared_ptr<ImageTexture2D> normalMap; // 法线贴图
+    std::shared_ptr<ImageTexture2D> ormMap; // ORM 贴图 (R=AO, G=Roughness, B=Metallic)
+    std::shared_ptr<ImageTexture2D> emissiveMap; // 自发光贴图
+    std::shared_ptr<ImageTexture2D> opacityMap; // 透明度贴图
     Material material;
 
     // 是否是Gizmo (编辑器辅助物体，如灯泡图标)，渲染时不受光照影响
@@ -140,6 +147,13 @@ public:
     // 法线贴图设置
     float normalStrength = 1.0f;
     bool flipNormalY = false;
+
+    // 自发光贴图设置
+    glm::vec3 emissiveColor = glm::vec3(0.0f); // 默认为黑色(不发光)
+    float emissiveStrength = 1.0f;             // 发光强度
+
+    // 透明的贴图设置
+    float alphaCutoff = 0.5f; // 低于此值的像素将被丢弃
 
     MeshShapeType shapeType = MeshShapeType::Cube;
     MeshParams params;

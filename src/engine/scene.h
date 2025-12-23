@@ -4,6 +4,7 @@
 #include <memory>
 #include <algorithm>
 #include "scene_object.h" // 根据你的实际路径调整
+#include "scene_environment.h"
 #include "geometry_factory.h"
 
 class Scene
@@ -32,6 +33,9 @@ public:
 
     // 清空场景
     void clear() { _gameObjects.clear(); }
+
+    SceneEnvironment& getEnvironment() { return _environment; }
+    const SceneEnvironment& getEnvironment() const { return _environment; }
 
     // --- 工厂方法 (从 SceneRoaming 迁移过来的逻辑) ---
     
@@ -64,6 +68,8 @@ public:
 
 private:
     std::vector<std::unique_ptr<GameObject>> _gameObjects;
+
+    SceneEnvironment _environment;
 
     std::vector<GameObject*> _killQueue;
 };

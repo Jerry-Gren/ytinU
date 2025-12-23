@@ -1848,8 +1848,9 @@ void InspectorPanel::drawComponentUI(Component *comp)
                     // OnDrop
                     [&](const std::string& path) {
                         bool initialFlatState = false;
-                        // 使用 path 加载
-                        auto newModel = ResourceManager::Get().getModel(path, initialFlatState);
+                        // 既然是新文件，重置 subMeshName，默认加载整个文件
+                        memset(mesh->params.subMeshName, 0, sizeof(mesh->params.subMeshName));
+                        auto newModel = ResourceManager::Get().getModel(path, initialFlatState, "");
                         if (newModel) {
                             mesh->setMesh(newModel);
                             mesh->isGizmo = false;
@@ -1911,7 +1912,7 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 break;
             case MeshShapeType::CustomOBJ:
                 if (strlen(p.objPath) > 0) {
-                    newModel = ResourceManager::Get().getModel(p.objPath, mesh->useFlatShade);
+                    newModel = ResourceManager::Get().getModel(p.objPath, mesh->useFlatShade, p.subMeshName);
                 }
                 break;
             default:
@@ -1951,9 +1952,25 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 // [逻辑] 没有光源组件，正常显示编辑器
                 // PBR 参数滑块
                 ImGui::ColorEdit3("Albedo", glm::value_ptr(mesh->material.albedo));
-                ImGui::SliderFloat("Metallic", &mesh->material.metallic, 0.0f, 1.0f);
-                ImGui::SliderFloat("Roughness", &mesh->material.roughness, 0.0f, 1.0f);
-                ImGui::SliderFloat("AO", &mesh->material.ao, 0.0f, 1.0f);
+                if (mesh->ormMap)
+                {
+                    // 样式优化：显示一个稍微暗淡的提示信息
+                    ImGui::Spacing();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("[Physical Props Controlled by Texture]");
+                    ImGui::BulletText("R: Occlusion");
+                    ImGui::BulletText("G: Roughness");
+                    ImGui::BulletText("B: Metallic");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+                }
+                else
+                {
+                    // 没有 ORM 贴图时，显示手动滑块
+                    ImGui::SliderFloat("Metallic", &mesh->material.metallic, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Roughness", &mesh->material.roughness, 0.0f, 1.0f);
+                    ImGui::SliderFloat("AO", &mesh->material.ao, 0.0f, 1.0f);
+                }
             }
 
             // 纹理贴图设置 (Texture Map)
@@ -2071,6 +2088,8 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 }
             }
 
+            ImGui::Separator();
+
             std::string normPath = mesh->normalMap ? mesh->normalMap->getUri() : "";
             std::string normName = std::filesystem::path(normPath).filename().string();
 
@@ -2094,6 +2113,75 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 }
                 
                 ImGui::Unindent();
+            }
+
+            ImGui::Separator();
+
+            std::string ormPath = mesh->ormMap ? mesh->ormMap->getUri() : "";
+            std::string ormName = std::filesystem::path(ormPath).filename().string();
+
+            drawResourceSlot("ORM Map", ormName, ormPath, "ASSET_TEXTURE",
+                [&](const std::string& path) {
+                    auto tex = ResourceManager::Get().getTexture(path);
+                    if (tex) mesh->ormMap = tex;
+                },
+                [&]() { mesh->ormMap = nullptr; }
+            );
+
+            if (mesh->ormMap) {
+                // 如果有贴图，提示用户滑块将失效或作为乘数
+                // 现代做法通常是：有贴图时，贴图完全接管。
+                // 可以在这里加个 Tooltip 解释 R=AO, G=Rough, B=Metal
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Packed Texture:\nRed = Occlusion\nGreen = Roughness\nBlue = Metallic");
+                }
+            }
+
+            ImGui::Separator();
+
+            std::string emissivePath = mesh->emissiveMap ? mesh->emissiveMap->getUri() : "";
+            std::string emissiveName = std::filesystem::path(emissivePath).filename().string();
+
+            drawResourceSlot("Emissive Map", emissiveName, emissivePath, "ASSET_TEXTURE",
+                [&](const std::string& path) {
+                    auto tex = ResourceManager::Get().getTexture(path);
+                    if (tex) {
+                        mesh->emissiveMap = tex;
+                        // [体验优化] 如果用户拖入了贴图且颜色为纯黑，自动设为纯白，否则看不见贴图
+                        if (mesh->emissiveColor == glm::vec3(0.0f)) {
+                            mesh->emissiveColor = glm::vec3(1.0f);
+                        }
+                    }
+                },
+                [&]() { mesh->emissiveMap = nullptr; }
+            );
+
+            // 颜色选择器 (HDR 颜色通常允许超过 1.0，但标准 ColorEdit 限制在 0-1，强度由 Strength 控制)
+            ImGui::ColorEdit3("Emissive Color", glm::value_ptr(mesh->emissiveColor));
+            
+            // 强度滑块 (允许超过 1.0 以产生泛光效果，上限设大一点比如 10.0 or 20.0)
+            ImGui::DragFloat("Intensity", &mesh->emissiveStrength, 0.1f, 0.0f, 20.0f);
+
+            ImGui::Separator();
+
+            std::string opacityPath = mesh->opacityMap ? mesh->opacityMap->getUri() : "";
+            std::string opacityName = std::filesystem::path(opacityPath).filename().string();
+
+            drawResourceSlot("Opacity Map", opacityName, opacityPath, "ASSET_TEXTURE",
+                [&](const std::string& path) {
+                    auto tex = ResourceManager::Get().getTexture(path);
+                    if (tex) mesh->opacityMap = tex;
+                },
+                [&]() { mesh->opacityMap = nullptr; }
+            );
+
+            if (mesh->opacityMap)
+            {
+                // 显示剪裁阈值滑块
+                ImGui::DragFloat("Alpha Cutoff", &mesh->alphaCutoff, 0.01f, 0.0f, 1.0f);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Pixels darker than this value will be discarded.\nUseful for foliage, fences, and grates.");
+                }
             }
 
             ImGui::Separator();
@@ -3648,7 +3736,7 @@ static glm::ivec3 parseFaceIndex(const std::string& token, size_t vSize, size_t 
     return result;
 }
 
-MeshData OBJLoader::load(const std::string& filepath, bool useFlatShade) {
+MeshData OBJLoader::load(const std::string& filepath, bool useFlatShade, const std::string& targetSubMeshName) {
     std::ifstream file(filepath);
     if (!file.is_open()) {
         // 抛出异常供 Model 捕获，或者打印错误并返回空数据
@@ -3664,6 +3752,13 @@ MeshData OBJLoader::load(const std::string& filepath, bool useFlatShade) {
 
     // 顶点去重 Map
     std::unordered_map<Vertex, uint32_t> uniqueVertices;
+
+    std::string currentObjectName = "Object";
+    std::string currentMaterialName = "Default";
+    // 组合名称，用于匹配 importScene 时的命名逻辑
+    // 逻辑：如果 targetSubMeshName 不为空，我们只在匹配时收集面
+    bool capturesAll = targetSubMeshName.empty();
+    bool isCapturing = capturesAll; // 默认状态
 
     std::string line;
     while (std::getline(file, line)) {
@@ -3686,10 +3781,47 @@ MeshData OBJLoader::load(const std::string& filepath, bool useFlatShade) {
         else if (type == "vt") {
             glm::vec2 vt;
             ss >> vt.x >> vt.y;
-            meshData.hasUVs = true;
+            meshData.hasUVs = true; // 注意：这里标记可能有误，如果只加载部分物体且该物体无UV，但全局有UV。不过通常无伤大雅。
             temp_texCoords.push_back(vt);
         }
+
+        else if (type == "o" || type == "g") {
+            if (!capturesAll) {
+                std::string name;
+                std::getline(ss, name);
+                // Trim
+                size_t first = name.find_first_not_of(" \t\r");
+                size_t last = name.find_last_not_of(" \t\r");
+                if (first != std::string::npos && last != std::string::npos) 
+                    currentObjectName = name.substr(first, last - first + 1);
+                else currentObjectName = "Object"; // Fallback
+
+                currentMaterialName = "Default"; // 重置材质名
+
+                // 检查是否匹配目标 (匹配 Object Name)
+                if (currentObjectName == targetSubMeshName) isCapturing = true;
+                else isCapturing = false;
+            }
+        }
+        else if (type == "usemtl") {
+            if (!capturesAll) {
+                ss >> currentMaterialName;
+                
+                // 检查是否匹配目标 (匹配 组合名称 "Object_Mat")
+                // 这必须和 importScene 里的命名逻辑完全一致
+                std::string combinedName = currentObjectName + "_" + currentMaterialName;
+                
+                if (currentObjectName == targetSubMeshName || combinedName == targetSubMeshName) {
+                    isCapturing = true;
+                } else {
+                    isCapturing = false;
+                }
+            }
+        }
+
         else if (type == "f") {
+            if (!isCapturing) continue;
+
             std::string token;
             std::vector<Vertex> faceVertices;
 
@@ -3780,6 +3912,10 @@ MeshData OBJLoader::load(const std::string& filepath, bool useFlatShade) {
     std::cout << "Loaded OBJ: " << filepath << "\n" 
               << "  Vertices: " << meshData.vertices.size() << "\n" 
               << "  Indices: " << meshData.indices.size() << std::endl;
+    
+    if (!capturesAll && meshData.vertices.empty()) {
+        std::cerr << "[OBJ Loader] Warning: SubMesh '" << targetSubMeshName << "' not found in " << filepath << std::endl;
+    }
 
     return meshData;
 }
@@ -3799,11 +3935,14 @@ std::vector<SubMesh> OBJLoader::loadScene(const std::string& filepath, bool useF
 
     // 当前正在构建的 SubMesh
     SubMesh currentMesh;
-    currentMesh.name = "Object_0";
+    currentMesh.name = "Default";
     currentMesh.hasUVs = false;
 
     // 当前 SubMesh 的顶点去重 Map
     std::unordered_map<Vertex, uint32_t> uniqueVertices;
+
+    std::string currentObjectName = "Object";
+    std::string currentMaterialName = "DefaultMat";
 
     // 辅助 lambda：用于在切换物体或结束时保存当前 Mesh
     auto flushCurrentMesh = [&]() {
@@ -3852,24 +3991,38 @@ std::vector<SubMesh> OBJLoader::loadScene(const std::string& filepath, bool useF
             global_texCoords.push_back(vt);
         }
 
-        // --- 切换物体 (o) 或 组 (g) ---
+        // --- 切换物体 (o/g) 或 材质 (usemtl) ---
         else if (type == "o" || type == "g") {
-            // 保存上一个物体
-            flushCurrentMesh();
-
-            // 读取新名字 (读取整行，因为名字可能包含空格)
             std::string name;
-            std::getline(ss, name); 
-            
-            // std::getline 会读取前面的空格，我们需要 Trim (修剪) 一下
+            std::getline(ss, name);
+            // Trim
             size_t first = name.find_first_not_of(" \t\r");
             size_t last = name.find_last_not_of(" \t\r");
+            if (first != std::string::npos && last != std::string::npos) 
+                name = name.substr(first, last - first + 1);
+            else name = "Object_" + std::to_string(meshes.size());
+
+            // 只有当名字真的变了，才切分 (防止 o 和 g 连着写导致生成空 mesh)
+            if (name != currentObjectName) {
+                flushCurrentMesh();
+                currentObjectName = name;
+                // 重置材质名，因为新物体可能还没定义 usemtl
+                currentMaterialName = "Default"; 
+                currentMesh.name = currentObjectName;
+            }
+        }
+        else if (type == "usemtl") {
+            std::string matName;
+            ss >> matName;
             
-            if (first != std::string::npos && last != std::string::npos) {
-                currentMesh.name = name.substr(first, last - first + 1);
-            } else {
-                // 如果全是空格或者为空
-                currentMesh.name = "Object"; 
+            // 如果材质变了，必须切分 Mesh！
+            // 因为我们的 MeshComponent 只能承载一个材质
+            if (matName != currentMaterialName) {
+                flushCurrentMesh();
+                currentMaterialName = matName;
+                // 新 Mesh 的名字组合：物体名_材质名
+                // 这样你在 Hierarchy 里能看到 "Chair_Wood" 和 "Chair_Fabric"
+                currentMesh.name = currentObjectName + "_" + currentMaterialName;
             }
         }
 
@@ -3971,7 +4124,7 @@ class OBJLoader {
 public:
     // 修改返回类型为 MeshData
     // 如果加载失败，选择抛出异常，或者返回空的 MeshData（根据你的错误处理策略）
-    static MeshData load(const std::string& filepath, bool useFlatShade = false);
+    static MeshData load(const std::string& filepath, bool useFlatShade = false, const std::string& targetSubMeshName = "");
 
     // 场景加载 (返回多个子网格)
     static std::vector<SubMesh> loadScene(const std::string& filepath, bool useSplitVert = false);
@@ -4881,6 +5034,18 @@ void Renderer::init() {
         uniform bool hasNormalMap;
         uniform float normalStrength; // 默认 1.0
         uniform bool flipNormalY;     // 默认 false
+        // ORM 贴图
+        uniform sampler2D ormMap;
+        uniform bool hasOrmMap;
+        // 自发光贴图
+        uniform sampler2D emissiveMap;
+        uniform bool hasEmissiveMap;
+        uniform vec3 emissiveColor;
+        uniform float emissiveStrength;
+        // 透明度贴图
+        uniform sampler2D opacityMap;
+        uniform bool hasOpacityMap;
+        uniform float alphaCutoff;
 
         // 动态环境贴图 IBL
         uniform samplerCube envMap;
@@ -5067,9 +5232,9 @@ void Renderer::init() {
         // 函数声明
         vec4 getTriplanarSample(vec3 worldPos, vec3 normal);
 
-        void CalcDirLight(DirLight light, vec3 N, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum);
-        void CalcPointLight(PointLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum);
-        void CalcSpotLight(SpotLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, inout vec3 diffAccum, inout vec3 specAccum);
+        void CalcDirLight(DirLight light, vec3 N, vec3 V, vec3 albedo, vec3 F0, float roughness, float shadow, inout vec3 diffAccum, inout vec3 specAccum);
+        void CalcPointLight(PointLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float roughness, float shadow, inout vec3 diffAccum, inout vec3 specAccum);
+        void CalcSpotLight(SpotLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float roughness, inout vec3 diffAccum, inout vec3 specAccum);
 
         vec3 BoxProjectedCubemapDirection(vec3 worldPos, vec3 worldRefDir, vec3 pPos, vec3 boxMin, vec3 boxMax);
 
@@ -5106,6 +5271,20 @@ void Renderer::init() {
             if (useTriplanar) {
                 // 使用 LocalPos 保证纹理随物体移动
                 triData = CalcTriplanarData(LocalPos, norm); 
+            }
+
+            if (hasOpacityMap) {
+                float opacity;
+                if (useTriplanar) {
+                    opacity = SampleTriplanar(opacityMap, triData).r; // 假设是灰度图，取 R 通道
+                } else {
+                    opacity = texture(opacityMap, TexCoord).r;
+                }
+
+                // 如果不透明度低于阈值，直接丢弃该像素
+                if (opacity < alphaCutoff) {
+                    discard;
+                }
             }
 
             vec3 albedoColor = material.albedo;
@@ -5151,12 +5330,33 @@ void Renderer::init() {
             
             vec3 viewDir = normalize(viewPos - FragPos);
 
+            float roughness = material.roughness;
+            float metallic  = material.metallic;
+            float ao        = material.ao;
+
+            if (hasOrmMap) {
+                vec4 ormSample;
+                if (useTriplanar) {
+                    ormSample = SampleTriplanar(ormMap, triData);
+                } else {
+                    ormSample = texture(ormMap, TexCoord);
+                }
+                
+                // glTF / Unreal 标准: 
+                // R = Occlusion (AO)
+                // G = Roughness
+                // B = Metallic
+                ao        = ormSample.r;
+                roughness = ormSample.g;
+                metallic  = ormSample.b;
+            }
+            
             // ================= PBR 参数准备 =================
             // F0: 基础反射率 (0度角的反射率)
             // 绝缘体(非金属) F0 约为 0.04
             // 导体(金属) F0 为自身的 albedo 颜色
             vec3 F0 = vec3(0.04); 
-            F0 = mix(F0, albedoColor, material.metallic);
+            F0 = mix(F0, albedoColor, metallic);
             // ==============================================
 
             // 分离 Diffuse 和 Specular 累加器
@@ -5170,7 +5370,7 @@ void Renderer::init() {
                     vec3 lightDir = normalize(-dirLights[i].direction);
                     shadow = ShadowCalculation(FragPos, norm, lightDir, ClipSpaceZ, dirLights[i].shadowIndex);
                 }
-                CalcDirLight(dirLights[i], norm, viewDir, albedoColor, F0, shadow, directDiffuse, directSpecular);
+                CalcDirLight(dirLights[i], norm, viewDir, albedoColor, F0, roughness, shadow, directDiffuse, directSpecular);
             }
             
             for(int i = 0; i < pointLightCount; i++) {
@@ -5179,11 +5379,11 @@ void Renderer::init() {
                     float rawShadow = CalcPointShadow(FragPos, pointLights[i].position, pointLights[i].shadowIndex, pointLights[i].range, pointLights[i].shadowRadius, pointLights[i].shadowBias);
                     shadow = mix(1.0, rawShadow, pointLights[i].shadowStrength);
                 }
-                CalcPointLight(pointLights[i], norm, FragPos, viewDir, albedoColor, F0, shadow, directDiffuse, directSpecular);
+                CalcPointLight(pointLights[i], norm, FragPos, viewDir, albedoColor, F0, roughness, shadow, directDiffuse, directSpecular);
             }
             
             for(int i = 0; i < spotLightCount; i++)
-                CalcSpotLight(spotLights[i], norm, FragPos, viewDir, albedoColor, F0, directDiffuse, directSpecular);
+                CalcSpotLight(spotLights[i], norm, FragPos, viewDir, albedoColor, F0, roughness, directDiffuse, directSpecular);
             
             // 2. 环境光 (IBL)
             vec3 ambientDiffuse = vec3(0.0);
@@ -5192,9 +5392,9 @@ void Renderer::init() {
             if (hasEnvMap) {
                 // Diffuse IBL
                 vec3 irradiance = textureLod(envMap, norm, 8.0).rgb; 
-                vec3 kS = FresnelSchlickRoughness(max(dot(norm, viewDir), 0.0), F0, material.roughness);
+                vec3 kS = FresnelSchlickRoughness(max(dot(norm, viewDir), 0.0), F0, roughness);
                 vec3 kD = 1.0 - kS;
-                kD *= 1.0 - material.metallic;
+                kD *= 1.0 - metallic;
                 
                 ambientDiffuse = kD * irradiance * albedoColor * iblIntensity;
 
@@ -5202,16 +5402,16 @@ void Renderer::init() {
                 vec3 R = reflect(-viewDir, norm);
                 vec3 correctedR = BoxProjectedCubemapDirection(FragPos, R, probePos, probeBoxMin, probeBoxMax);
                 float MAX_LOD = 4.0;
-                vec3 prefilteredColor = textureLod(envMap, correctedR, material.roughness * MAX_LOD).rgb;
-                vec3 specularFactor = EnvBRDFApprox(F0, material.roughness, max(dot(norm, viewDir), 0.0));
+                vec3 prefilteredColor = textureLod(envMap, correctedR, roughness * MAX_LOD).rgb;
+                vec3 specularFactor = EnvBRDFApprox(F0, roughness, max(dot(norm, viewDir), 0.0));
                 
                 ambientSpecular = prefilteredColor * specularFactor * iblIntensity;
             } else {
-                ambientDiffuse = vec3(0.03) * albedoColor * material.ao; 
+                ambientDiffuse = vec3(0.03) * albedoColor * ao;
             }
             
             // 3. 组合 PBR 不透明部分
-            vec3 opaqueColor = (ambientDiffuse + directDiffuse) * material.ao + (ambientSpecular + directSpecular);
+            vec3 opaqueColor = (ambientDiffuse + directDiffuse) * ao + (ambientSpecular + directSpecular);
             
             // 4. 玻璃/折射逻辑 (关键修改)
             vec3 finalColor = opaqueColor;
@@ -5261,6 +5461,25 @@ void Renderer::init() {
 
                 finalColor = mix(opaqueColor, glassResult, material.transparency);
             }
+
+            // 自发光
+            vec3 emission = emissiveColor * emissiveStrength;
+            
+            if (hasEmissiveMap) {
+                vec3 emTex;
+                if (useTriplanar) {
+                    emTex = SampleTriplanar(emissiveMap, triData).rgb;
+                } else {
+                    emTex = texture(emissiveMap, TexCoord).rgb;
+                }
+                
+                // 自发光贴图是颜色信息，通常是 sRGB 的，需要转到 Linear 空间
+                emTex = pow(emTex, vec3(2.2));
+                
+                emission *= emTex;
+            }
+            
+            finalColor += emission;
 
             // 5. Tone Mapping (ACES)
             finalColor = ACESFilm(finalColor);
@@ -5406,7 +5625,7 @@ void Renderer::init() {
             return normalize(blendedNormal);
         }
 
-        void CalcDirLight(DirLight light, vec3 N, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum) {
+        void CalcDirLight(DirLight light, vec3 N, vec3 V, vec3 albedo, vec3 F0, float roughness, float shadow, inout vec3 diffAccum, inout vec3 specAccum) {
             vec3 L = normalize(-light.direction);
             vec3 H = normalize(V + L);
             float NdotL = max(dot(N, L), 0.0);
@@ -5415,8 +5634,8 @@ void Renderer::init() {
             vec3 radiance = light.color * light.intensity * shadow;
 
             // Cook-Torrance
-            float NDF = DistributionGGX(N, H, material.roughness);   
-            float G   = GeometrySmith(N, V, L, material.roughness);      
+            float NDF = DistributionGGX(N, H, roughness);    
+            float G   = GeometrySmith(N, V, L, roughness);       
             vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
            
             vec3 numerator    = NDF * G * F; 
@@ -5425,6 +5644,22 @@ void Renderer::init() {
             
             vec3 kS = F;
             vec3 kD = vec3(1.0) - kS;
+            // 注意：metallic 我们在 main 函数里计算 F0 时已经处理了，这里只需要 roughness
+            // 但 kD *= 1.0 - metallic 这个逻辑通常也是在 main 里通过 F0 隐式处理，
+            // 或者我们可以保留 metallic 作为一个参数传进来。
+            // 为了简化，标准 PBR 流程中 F0 已经蕴含了金属度信息，kD 的缩放可以在外面做，
+            // 但为了保持和你现有代码一致，我们假设 metallic 仅影响 F0 的计算，
+            // 这里的 kD 缩放其实应该用传入的 metallic。
+            // 鉴于改动量，我们**暂时保留**读取 material.metallic，因为 metallic 通常不需要逐像素变化得那么剧烈，
+            // 或者你可以把 metallic 也加进参数里。为了严谨，我们假设 metallic 还是全局的，
+            // 因为 ORM 里的 M 通道通常是非 0 即 1。
+            // *修正*：为了完全正确支持 ORM，metallic 也必须是局部的。
+            // 让我们简单点：既然要改，就只改 roughness。Metallic 的影响主要在 F0 (已传入) 和 kD。
+            // 在这里我们暂时不传 metallic，而是依赖 main 函数算好的 albedo 和 F0。
+            // 唯一的问题是 kD *= 1.0 - metallic。
+            // 如果你想完美，最好把 metallic 也传进来。
+            // **为了代码最小化改动**：我们这里先不动 metallic (仍然读全局)，只动 roughness。
+            // 如果你发现金属贴图的非金属部分太暗，我们再回来改这个。
             kD *= 1.0 - material.metallic;	  
 
             // 累加
@@ -5432,7 +5667,7 @@ void Renderer::init() {
             specAccum += specular * radiance * NdotL;
         }
 
-        void CalcPointLight(PointLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum) {
+        void CalcPointLight(PointLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float roughness, float shadow, inout vec3 diffAccum, inout vec3 specAccum) {
             vec3 L = normalize(light.position - pos);
             vec3 H = normalize(V + L);
             float distance = length(light.position - pos);
@@ -5441,8 +5676,8 @@ void Renderer::init() {
 
             vec3 radiance = light.color * light.intensity * attenuation * shadow;
 
-            float NDF = DistributionGGX(N, H, material.roughness);   
-            float G   = GeometrySmith(N, V, L, material.roughness);      
+            float NDF = DistributionGGX(N, H, roughness);
+            float G   = GeometrySmith(N, V, L, roughness);
             vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
            
             vec3 numerator    = NDF * G * F; 
@@ -5457,7 +5692,7 @@ void Renderer::init() {
             specAccum += specular * radiance * NdotL;
         }
 
-        void CalcSpotLight(SpotLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, inout vec3 diffAccum, inout vec3 specAccum) {
+        void CalcSpotLight(SpotLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float roughness, inout vec3 diffAccum, inout vec3 specAccum) {
             vec3 L = normalize(light.position - pos);
             vec3 H = normalize(V + L);
             float distance = length(light.position - pos);
@@ -5470,8 +5705,8 @@ void Renderer::init() {
 
             vec3 radiance = light.color * light.intensity * attenuation * intensity;
 
-            float NDF = DistributionGGX(N, H, material.roughness);   
-            float G   = GeometrySmith(N, V, L, material.roughness);      
+            float NDF = DistributionGGX(N, H, roughness);
+            float G   = GeometrySmith(N, V, L, roughness);
             vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
            
             vec3 numerator    = NDF * G * F; 
@@ -5737,9 +5972,13 @@ void Renderer::init() {
     _mainShader->setUniformInt("normalMap", 1);   // Slot 1: Normal
     _mainShader->setUniformInt("shadowMap", 2);   // Slot 2: CSM Array
     _mainShader->setUniformInt("envMap", 3);      // Slot 3: IBL Cubemap (改到3，避开NormalMap)
+    _mainShader->setUniformInt("ormMap", 4);      // Slot 4: ORM
+    _mainShader->setUniformInt("emissiveMap", 5); // Slot 5: Emissive
+    _mainShader->setUniformInt("opacityMap", 6);  // Slot 6: Opacity
 
-    // Slot 4,5,6,7 用于点光源阴影
-    int pointShadowSamplers[4] = {4, 5, 6, 7};
+
+    // Slot 7,8,9,10 用于点光源阴影
+    int pointShadowSamplers[4] = {7, 8, 9, 10};
     glUniform1iv(glGetUniformLocation(_mainShader->getHandle(), "pointShadowMaps"), 4, pointShadowSamplers);
 
     // =============================================================
@@ -6043,10 +6282,9 @@ void Renderer::render(const Scene& scene, Camera* camera,
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D_ARRAY, _shadowPass->getDepthMapArray());
 
-    // 绑定 Point Shadow Cubemaps 到 Slot 4, 5, 6, 7
-    // Slot 0: Diffuse, Slot 1: Env, Slot 2: CSM, Slot 3: Reserved
+    // 绑定 Point Shadow Cubemaps 到 Slot 7, 8, 9, 10
     for (int i = 0; i < pointShadowInfos.size(); ++i) {
-        glActiveTexture(GL_TEXTURE4 + i);
+        glActiveTexture(GL_TEXTURE7 + i);
         glBindTexture(GL_TEXTURE_CUBE_MAP, _pointShadowPass->getShadowMap(i));
     }
 
@@ -6153,9 +6391,8 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
     for(auto l : dirLights) if(l->castShadows) { globalBias = l->shadowBias; break; }
     _mainShader->setUniformFloat("shadowBias", globalBias);
 
-    // 2. Point Shadows -> Slot 4, 5, 6, 7
-    // 告诉 Shader：pointShadowMaps[0] 在纹理单元 4，[1] 在 5...
-    int pointShadowSamplers[4] = {4, 5, 6, 7};
+    // 2. Point Shadows -> Slot 7, 8, 9, 10
+    int pointShadowSamplers[4] = {7, 8, 9, 10};
     GLint locPointMaps = glGetUniformLocation(_mainShader->getHandle(), "pointShadowMaps");
     if (locPointMaps != -1) {
         // 传递数组
@@ -6269,21 +6506,49 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
             _mainShader->setUniformBool("hasDiffuseMap", true);
         } else {
             _mainShader->setUniformBool("hasDiffuseMap", false);
-            // 为了安全，解绑 Slot 0 或者绑定一个白色纹理
-            // Texture2D::unbind() 是静态的或者解绑当前，这里简单处理：
-            // 只要 hasDiffuseMap 是 false，Shader 就不会采样，所以不解绑也行，
-            // 但为了防止状态污染，最好解绑。
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, 0);
         }
 
         if (meshComp->normalMap) {
-            meshComp->normalMap->bind(1); // 绑定到 Slot 1
+            meshComp->normalMap->bind(1); // Slot 1
             _mainShader->setUniformBool("hasNormalMap", true);
             _mainShader->setUniformFloat("normalStrength", meshComp->normalStrength);
             _mainShader->setUniformBool("flipNormalY", meshComp->flipNormalY);
         } else {
             _mainShader->setUniformBool("hasNormalMap", false);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
+        if (meshComp->ormMap) {
+            meshComp->ormMap->bind(4); // Slot 4
+            _mainShader->setUniformBool("hasOrmMap", true);
+        } else {
+            _mainShader->setUniformBool("hasOrmMap", false);
+            glActiveTexture(GL_TEXTURE8);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
+        if (meshComp->emissiveMap) {
+            meshComp->emissiveMap->bind(5); // Slot 5
+            _mainShader->setUniformBool("hasEmissiveMap", true);
+        } else {
+            _mainShader->setUniformBool("hasEmissiveMap", false);
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+        _mainShader->setUniformVec3("emissiveColor", meshComp->emissiveColor);
+        _mainShader->setUniformFloat("emissiveStrength", meshComp->emissiveStrength);
+
+        if (meshComp->opacityMap) {
+            meshComp->opacityMap->bind(6); // Slot 6
+            _mainShader->setUniformBool("hasOpacityMap", true);
+            _mainShader->setUniformFloat("alphaCutoff", meshComp->alphaCutoff);
+        } else {
+            _mainShader->setUniformBool("hasOpacityMap", false);
+            glActiveTexture(GL_TEXTURE6);
+            glBindTexture(GL_TEXTURE_2D, 0);
         }
         
         _mainShader->setUniformBool("isUnlit", meshComp->isGizmo);
@@ -6507,6 +6772,7 @@ private:
 ./engine/resource_manager.cpp:
 ```
 #include "resource_manager.h"
+#include "obj_loader.h"
 #include <iostream>
 #include <algorithm>
 
@@ -6578,13 +6844,14 @@ void ResourceManager::scanDirectory(const std::string& rootDir)
     }
 }
 
-std::shared_ptr<Model> ResourceManager::getModel(const std::string& pathKey, bool useFlatShade)
+std::shared_ptr<Model> ResourceManager::getModel(const std::string& pathKey, bool useFlatShade, const std::string& subMeshName)
 {
     std::string cleanPath = pathKey;
     std::replace(cleanPath.begin(), cleanPath.end(), '\\', '/');
 
     std::string cacheKey = cleanPath;
     if (useFlatShade) cacheKey += ":useFlatShade";
+    if (!subMeshName.empty()) cacheKey += ":" + subMeshName;
 
     // 1. 检查缓存 (Key 是相对路径，比如 "assets/sphere.obj")
     auto it = _modelCache.find(cacheKey);
@@ -6606,12 +6873,12 @@ std::shared_ptr<Model> ResourceManager::getModel(const std::string& pathKey, boo
     // std::cout << "Loading Model: " << fullPath << std::endl;
 
     try {
-        // 3. 使用【绝对路径】去打开文件
-        std::shared_ptr<Model> newModel = std::make_shared<Model>(fullPath, useFlatShade);
+        MeshData data = OBJLoader::load(fullPath, useFlatShade, subMeshName);
+        if (data.vertices.empty()) return nullptr;
+
+        std::shared_ptr<Model> newModel = std::make_shared<Model>(data.vertices, data.indices);
         
-        // 4. 存入缓存 (Key 依然是【相对路径】，方便下次查找)
         _modelCache[cacheKey] = newModel;
-        
         return newModel;
     }
     catch (std::exception& e) {
@@ -6651,6 +6918,41 @@ std::shared_ptr<ImageTexture2D> ResourceManager::getTexture(const std::string& p
         return nullptr;
     }
 }
+
+void ResourceManager::injectCache(const std::string& pathKey, const std::string& subMeshName, bool useFlatShade, std::shared_ptr<Model> model)
+{
+    if (!model) return;
+
+    // 1. 标准化路径
+    std::string cleanPath = pathKey;
+    std::replace(cleanPath.begin(), cleanPath.end(), '\\', '/');
+
+    // 2. 生成 Cache Key
+    std::string cacheKey = cleanPath;
+    if (useFlatShade) cacheKey += ":useFlatShade";
+    if (!subMeshName.empty()) cacheKey += ":" + subMeshName;
+
+    // 3. 存入缓存
+    _modelCache[cacheKey] = model;
+    
+    std::cout << "[ResourceManager] Injected cache: " << cacheKey << std::endl;
+}
+
+std::shared_ptr<Model> ResourceManager::findModel(const std::string& pathKey, bool useFlatShade, const std::string& subMeshName)
+{
+    std::string cleanPath = pathKey;
+    std::replace(cleanPath.begin(), cleanPath.end(), '\\', '/');
+
+    std::string cacheKey = cleanPath;
+    if (useFlatShade) cacheKey += ":useFlatShade";
+    if (!subMeshName.empty()) cacheKey += ":" + subMeshName;
+
+    auto it = _modelCache.find(cacheKey);
+    if (it != _modelCache.end()) {
+        return it->second;
+    }
+    return nullptr;
+}
 ```
 
 ./engine/resource_manager.h:
@@ -6682,7 +6984,7 @@ public:
 
     // 加载或获取已缓存的模型
     // path: 相对路径，例如 "obj/bunny.obj"
-    std::shared_ptr<Model> getModel(const std::string& pathKey, bool useFlatShade);
+    std::shared_ptr<Model> getModel(const std::string& pathKey, bool useFlatShade, const std::string& subMeshName = "");
 
     // 加载或获取已缓存的纹理
     std::shared_ptr<ImageTexture2D> getTexture(const std::string& pathKey);
@@ -6693,6 +6995,12 @@ public:
 
     // 获取扫描到的文件列表 (文件名, 相对路径)
     const std::vector<std::pair<std::string, std::string>>& getFileList() const { return _fileList; }
+
+    // 手动将已加载的模型注入缓存
+    void injectCache(const std::string& pathKey, const std::string& subMeshName, bool useFlatShade, std::shared_ptr<Model> model);
+
+    // 仅检查缓存中是否存在，不触发加载
+    std::shared_ptr<Model> findModel(const std::string& pathKey, bool useFlatShade, const std::string& subMeshName = "");
 
     void shutdown() {
         _modelCache.clear(); // 强制释放所有 Model shared_ptr
@@ -6886,6 +7194,44 @@ void Scene::exportToOBJ(const std::string& filename)
 
 void Scene::importSceneFromOBJ(const std::string& filepath)
 {
+    auto cachedSingleModel = ResourceManager::Get().findModel(filepath, false, "");
+
+    if (cachedSingleModel)
+    {
+        std::string name = std::filesystem::path(filepath).stem().string();
+        
+        auto go = new GameObject(name);
+        
+        // 直接复用指针
+        auto meshComp = go->addComponent<MeshComponent>(cachedSingleModel);
+        meshComp->shapeType = MeshShapeType::CustomOBJ;
+
+        // 填充参数
+        strncpy(meshComp->params.objPath, filepath.c_str(), sizeof(meshComp->params.objPath) - 1);
+        meshComp->params.objPath[sizeof(meshComp->params.objPath) - 1] = '\0';
+        
+        // 因为是复用 Single Mesh，我们无法获知文件内部原本的 Group Name，只能用文件名代替
+        strncpy(meshComp->params.subMeshName, name.c_str(), sizeof(meshComp->params.subMeshName) - 1);
+        meshComp->params.subMeshName[sizeof(meshComp->params.subMeshName) - 1] = '\0';
+
+        // 智能 UV 检测 (查询模型本身)
+        if (!cachedSingleModel->hasUVs()) {
+            meshComp->useTriplanar = true;
+            meshComp->triplanarScale = 0.2f;
+        } else {
+            meshComp->useTriplanar = false;
+        }
+
+        _gameObjects.push_back(std::unique_ptr<GameObject>(go));
+
+        // [重要] 注册别名缓存
+        // 这样下次如果你尝试获取 "filepath:filename"，也能命中这个缓存
+        ResourceManager::Get().injectCache(filepath, name, false, cachedSingleModel);
+
+        std::cout << "[Scene] Fast-Import (Cache Hit): " << name << " (0ms)" << std::endl;
+        return; // <--- 直接结束，不再执行下面的解析
+    }
+
     // 1. 调用多网格加载器
     // 这里的 false 表示不强制 Split Vertices (Smooth Shading)，保留 OBJ 原貌
     // 如果你希望导入的模型默认都是 Low-Poly 风格，可以传 true
@@ -6903,42 +7249,53 @@ void Scene::importSceneFromOBJ(const std::string& filepath)
         return;
     }
 
+    // 如果场景里只有一个物体，说明它和 Import Single Mesh 的结果在几何上是完全等价的。
+    // 我们应该让它们共享内存。
+    bool isSingleObjectScene = (meshes.size() == 1);
+    
+    // 如果只有 1 个物体，先尝试去 ResourceManager 找 "单体 Key" (无 subMeshName 后缀的 Key)
+    std::shared_ptr<Model> existingSingleModel = nullptr;
+    if (isSingleObjectScene) {
+        // 这里的第三个参数传 ""，即查找 "filepath" 对应的缓存
+        existingSingleModel = ResourceManager::Get().findModel(filepath, false, "");
+    }
+
     // 2. 为每个 SubMesh 创建 GameObject
     for (const auto& subMesh : meshes)
     {
-        // 创建 GameObject
-        // 注意：subMesh.name 来自 OBJ 文件里的 'o' 或 'g' 标签
         auto go = new GameObject(subMesh.name);
-
-        // 创建 Model
-        // 我们利用现有的 Model 构造函数 (从顶点/索引数组构建)
-        // 注意：Model 内部会重新计算包围盒
+        
+        // 创建新模型
         auto model = std::make_shared<Model>(subMesh.vertices, subMesh.indices);
         
-        // 添加 MeshComponent
+        // 1. 注册标准 SubMesh 缓存
+        ResourceManager::Get().injectCache(filepath, subMesh.name, false, model);
+
+        // 2. 如果这是唯一的物体，顺便注册 "Single Mesh" 缓存
+        if (isSingleObjectScene) {
+            ResourceManager::Get().injectCache(filepath, "", false, model);
+        }
+
         auto meshComp = go->addComponent<MeshComponent>(model);
         meshComp->shapeType = MeshShapeType::CustomOBJ;
         
-        // 记录来源路径
-        // 虽然这个路径指向的是整个场景文件，但作为元数据保留是有用的
         strncpy(meshComp->params.objPath, filepath.c_str(), sizeof(meshComp->params.objPath) - 1);
         meshComp->params.objPath[sizeof(meshComp->params.objPath) - 1] = '\0';
+
+        strncpy(meshComp->params.subMeshName, subMesh.name.c_str(), sizeof(meshComp->params.subMeshName) - 1);
+        meshComp->params.subMeshName[sizeof(meshComp->params.subMeshName) - 1] = '\0';
         
-        // [智能 UV 检测]
-        // 如果 SubMesh 标记没有 UV，自动开启 Triplanar Mapping
-        // 这样导入的无 UV 模型（如简单的几何体组合）也能直接贴图
         if (!subMesh.hasUVs) {
             meshComp->useTriplanar = true;
-            meshComp->triplanarScale = 0.2f; // 默认缩放，可视情况调整
+            meshComp->triplanarScale = 0.2f; 
         } else {
             meshComp->useTriplanar = false;
         }
 
-        // 将新创建的物体加入场景列表
         _gameObjects.push_back(std::unique_ptr<GameObject>(go));
     }
     
-    std::cout << "[Scene] Imported " << meshes.size() << " objects from " << filepath << std::endl;
+    std::cout << "[Scene] Imported and Parsed " << meshes.size() << " objects from " << filepath << std::endl;
 }
 
 void Scene::importSingleMeshFromOBJ(const std::string& filepath)
@@ -6947,44 +7304,38 @@ void Scene::importSingleMeshFromOBJ(const std::string& filepath)
     std::string name = std::filesystem::path(filepath).stem().string();
     if (name.empty()) name = "Imported Mesh";
 
-    // 2. 加载网格数据 (Flatten 模式，不拆分物体)
-    MeshData meshData;
-    try {
-        // false = 不强制 Flat Shading (默认平滑)
-        meshData = OBJLoader::load(filepath, false);
-    }
-    catch (const std::exception& e) {
-        std::cerr << "[Scene] Failed to load mesh: " << e.what() << std::endl;
-        return;
-    }
+    // 通过 ResourceManager 获取模型
+    // 这里的第三个参数传 "" (空字符串)，表示我们要获取“整个文件”对应的模型
+    // ResourceManager 会先查缓存，如果 importScene 之前注入过 "" 对应的 Key，这里直接命中，耗时 0ms
+    std::shared_ptr<Model> model = ResourceManager::Get().getModel(filepath, false, "");
 
-    if (meshData.vertices.empty()) {
-        std::cerr << "[Scene] Mesh is empty: " << filepath << std::endl;
+    if (!model) {
+        // 如果 ResourceManager 返回空，说明文件不存在或解析失败（它内部已经打印了错误日志）
         return;
     }
 
     // 3. 创建 GameObject
     auto go = new GameObject(name);
 
-    // 4. 创建 Model
-    // 使用顶点和索引数组构建 Model
-    auto model = std::make_shared<Model>(meshData.vertices, meshData.indices);
-
-    // 5. 添加 MeshComponent
+    // 直接使用获取到的 model
     auto meshComp = go->addComponent<MeshComponent>(model);
     
     // 设置类型为 CustomOBJ，这样 Inspector 会显示文件路径槽
     meshComp->shapeType = MeshShapeType::CustomOBJ;
 
-    // 6. 记录文件路径
+    // 5. 记录文件路径
     strncpy(meshComp->params.objPath, filepath.c_str(), sizeof(meshComp->params.objPath) - 1);
     meshComp->params.objPath[sizeof(meshComp->params.objPath) - 1] = '\0';
 
+    // Single Mesh 模式下，subMeshName 应该为空
+    // 这样下次点击 Flat Shade 时，Inspector 传给 ResourceManager 的也是空名，依然能命中缓存
+    memset(meshComp->params.subMeshName, 0, sizeof(meshComp->params.subMeshName));
+
     // 7. [智能 UV 检测]
     // 如果加载的数据里没有 UV，自动开启 Triplanar Mapping
-    if (!meshData.hasUVs) {
+    if (!model->hasUVs()) {
         meshComp->useTriplanar = true;
-        meshComp->triplanarScale = 0.2f; // 默认缩放值，可视情况调整
+        meshComp->triplanarScale = 0.2f; 
     } else {
         meshComp->useTriplanar = false;
     }
@@ -6992,7 +7343,7 @@ void Scene::importSingleMeshFromOBJ(const std::string& filepath)
     // 8. 加入场景列表
     _gameObjects.push_back(std::unique_ptr<GameObject>(go));
 
-    std::cout << "[Scene] Imported single mesh: " << name << std::endl;
+    std::cout << "[Scene] Imported single mesh: " << name << " (Cached: " << (model ? "Yes" : "No") << ")" << std::endl;
 }
 ```
 
@@ -7231,6 +7582,10 @@ struct MeshParams
 
     // OBJ
     char objPath[256] = "";
+
+    // 子网格名称过滤器
+    // 如果为空，加载整个文件；如果不为空，只加载匹配该名称的 group/object/material
+    char subMeshName[128] = "";
 };
 
 // ==========================================
@@ -7274,6 +7629,9 @@ public:
     std::shared_ptr<Model> model;
     std::shared_ptr<ImageTexture2D> diffuseMap; // 漫反射贴图
     std::shared_ptr<ImageTexture2D> normalMap; // 法线贴图
+    std::shared_ptr<ImageTexture2D> ormMap; // ORM 贴图 (R=AO, G=Roughness, B=Metallic)
+    std::shared_ptr<ImageTexture2D> emissiveMap; // 自发光贴图
+    std::shared_ptr<ImageTexture2D> opacityMap; // 透明度贴图
     Material material;
 
     // 是否是Gizmo (编辑器辅助物体，如灯泡图标)，渲染时不受光照影响
@@ -7304,6 +7662,13 @@ public:
     // 法线贴图设置
     float normalStrength = 1.0f;
     bool flipNormalY = false;
+
+    // 自发光贴图设置
+    glm::vec3 emissiveColor = glm::vec3(0.0f); // 默认为黑色(不发光)
+    float emissiveStrength = 1.0f;             // 发光强度
+
+    // 透明的贴图设置
+    float alphaCutoff = 0.5f; // 低于此值的像素将被丢弃
 
     MeshShapeType shapeType = MeshShapeType::Cube;
     MeshParams params;

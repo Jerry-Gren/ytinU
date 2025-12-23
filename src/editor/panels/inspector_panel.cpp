@@ -299,8 +299,9 @@ void InspectorPanel::drawComponentUI(Component *comp)
                     // OnDrop
                     [&](const std::string& path) {
                         bool initialFlatState = false;
-                        // 使用 path 加载
-                        auto newModel = ResourceManager::Get().getModel(path, initialFlatState);
+                        // 既然是新文件，重置 subMeshName，默认加载整个文件
+                        memset(mesh->params.subMeshName, 0, sizeof(mesh->params.subMeshName));
+                        auto newModel = ResourceManager::Get().getModel(path, initialFlatState, "");
                         if (newModel) {
                             mesh->setMesh(newModel);
                             mesh->isGizmo = false;
@@ -362,7 +363,7 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 break;
             case MeshShapeType::CustomOBJ:
                 if (strlen(p.objPath) > 0) {
-                    newModel = ResourceManager::Get().getModel(p.objPath, mesh->useFlatShade);
+                    newModel = ResourceManager::Get().getModel(p.objPath, mesh->useFlatShade, p.subMeshName);
                 }
                 break;
             default:
@@ -402,9 +403,25 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 // [逻辑] 没有光源组件，正常显示编辑器
                 // PBR 参数滑块
                 ImGui::ColorEdit3("Albedo", glm::value_ptr(mesh->material.albedo));
-                ImGui::SliderFloat("Metallic", &mesh->material.metallic, 0.0f, 1.0f);
-                ImGui::SliderFloat("Roughness", &mesh->material.roughness, 0.0f, 1.0f);
-                ImGui::SliderFloat("AO", &mesh->material.ao, 0.0f, 1.0f);
+                if (mesh->ormMap)
+                {
+                    // 样式优化：显示一个稍微暗淡的提示信息
+                    ImGui::Spacing();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+                    ImGui::Text("[Physical Props Controlled by Texture]");
+                    ImGui::BulletText("R: Occlusion");
+                    ImGui::BulletText("G: Roughness");
+                    ImGui::BulletText("B: Metallic");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+                }
+                else
+                {
+                    // 没有 ORM 贴图时，显示手动滑块
+                    ImGui::SliderFloat("Metallic", &mesh->material.metallic, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Roughness", &mesh->material.roughness, 0.0f, 1.0f);
+                    ImGui::SliderFloat("AO", &mesh->material.ao, 0.0f, 1.0f);
+                }
             }
 
             // 纹理贴图设置 (Texture Map)
@@ -522,6 +539,8 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 }
             }
 
+            ImGui::Separator();
+
             std::string normPath = mesh->normalMap ? mesh->normalMap->getUri() : "";
             std::string normName = std::filesystem::path(normPath).filename().string();
 
@@ -545,6 +564,75 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 }
                 
                 ImGui::Unindent();
+            }
+
+            ImGui::Separator();
+
+            std::string ormPath = mesh->ormMap ? mesh->ormMap->getUri() : "";
+            std::string ormName = std::filesystem::path(ormPath).filename().string();
+
+            drawResourceSlot("ORM Map", ormName, ormPath, "ASSET_TEXTURE",
+                [&](const std::string& path) {
+                    auto tex = ResourceManager::Get().getTexture(path);
+                    if (tex) mesh->ormMap = tex;
+                },
+                [&]() { mesh->ormMap = nullptr; }
+            );
+
+            if (mesh->ormMap) {
+                // 如果有贴图，提示用户滑块将失效或作为乘数
+                // 现代做法通常是：有贴图时，贴图完全接管。
+                // 可以在这里加个 Tooltip 解释 R=AO, G=Rough, B=Metal
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Packed Texture:\nRed = Occlusion\nGreen = Roughness\nBlue = Metallic");
+                }
+            }
+
+            ImGui::Separator();
+
+            std::string emissivePath = mesh->emissiveMap ? mesh->emissiveMap->getUri() : "";
+            std::string emissiveName = std::filesystem::path(emissivePath).filename().string();
+
+            drawResourceSlot("Emissive Map", emissiveName, emissivePath, "ASSET_TEXTURE",
+                [&](const std::string& path) {
+                    auto tex = ResourceManager::Get().getTexture(path);
+                    if (tex) {
+                        mesh->emissiveMap = tex;
+                        // [体验优化] 如果用户拖入了贴图且颜色为纯黑，自动设为纯白，否则看不见贴图
+                        if (mesh->emissiveColor == glm::vec3(0.0f)) {
+                            mesh->emissiveColor = glm::vec3(1.0f);
+                        }
+                    }
+                },
+                [&]() { mesh->emissiveMap = nullptr; }
+            );
+
+            // 颜色选择器 (HDR 颜色通常允许超过 1.0，但标准 ColorEdit 限制在 0-1，强度由 Strength 控制)
+            ImGui::ColorEdit3("Emissive Color", glm::value_ptr(mesh->emissiveColor));
+            
+            // 强度滑块 (允许超过 1.0 以产生泛光效果，上限设大一点比如 10.0 or 20.0)
+            ImGui::DragFloat("Intensity", &mesh->emissiveStrength, 0.1f, 0.0f, 20.0f);
+
+            ImGui::Separator();
+
+            std::string opacityPath = mesh->opacityMap ? mesh->opacityMap->getUri() : "";
+            std::string opacityName = std::filesystem::path(opacityPath).filename().string();
+
+            drawResourceSlot("Opacity Map", opacityName, opacityPath, "ASSET_TEXTURE",
+                [&](const std::string& path) {
+                    auto tex = ResourceManager::Get().getTexture(path);
+                    if (tex) mesh->opacityMap = tex;
+                },
+                [&]() { mesh->opacityMap = nullptr; }
+            );
+
+            if (mesh->opacityMap)
+            {
+                // 显示剪裁阈值滑块
+                ImGui::DragFloat("Alpha Cutoff", &mesh->alphaCutoff, 0.01f, 0.0f, 1.0f);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Pixels darker than this value will be discarded.\nUseful for foliage, fences, and grates.");
+                }
             }
 
             ImGui::Separator();

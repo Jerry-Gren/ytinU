@@ -12,6 +12,7 @@
 #include "editor/panels/inspector_panel.h"
 #include "editor/panels/project_panel.h"
 #include "editor/panels/scene_view_panel.h"
+#include "editor/panels/environment_panel.h"
 #include "engine/scene_object.h"
 #include "engine/outline_pass.h"
 #include "engine/resource_manager.h"
@@ -33,6 +34,7 @@ private:
     std::unique_ptr<HierarchyPanel> _hierarchyPanel;
     std::unique_ptr<InspectorPanel> _inspectorPanel;
     std::unique_ptr<ProjectPanel> _projectPanel;
+    std::unique_ptr<EnvironmentPanel> _envPanel;
 
     // 编辑器状态变量
     bool _isLayoutInitialized = false; // 用于只在第一次运行时设置窗口位置

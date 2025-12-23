@@ -32,7 +32,8 @@ void ProjectPanel::onImGuiRender()
         std::string ext = std::filesystem::path(filename).extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
         bool isModel = (ext == ".obj");
-        bool isTexture = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga");
+        bool isTexture = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
+                          ext == ".bmp" || ext == ".tga" || ext == ".hdr");
 
         ImGui::PushID(relativePath.c_str());
 

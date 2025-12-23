@@ -1,6 +1,5 @@
 #include "scene.h"
 #include "resource_manager.h" // 如果需要加载默认图标
-#include "obj_loader.h"
 
 #include <fstream>
 #include <iomanip>
@@ -167,59 +166,52 @@ void Scene::exportToOBJ(const std::string& filename)
 
 void Scene::importSceneFromOBJ(const std::string& filepath)
 {
-    // 1. 调用多网格加载器
-    // 这里的 false 表示不强制 Split Vertices (Smooth Shading)，保留 OBJ 原貌
-    // 如果你希望导入的模型默认都是 Low-Poly 风格，可以传 true
-    std::vector<SubMesh> meshes;
-    try {
-        meshes = OBJLoader::loadScene(filepath, false);
-    }
-    catch (const std::exception& e) {
-        std::cerr << "[Scene] Import failed: " << e.what() << std::endl;
+    // 1. 向资源管理器请求场景资源
+    // 此时 ResourceManager 会负责：
+    // - 检查缓存签名
+    // - 如果文件变了，自动重载
+    // - 自动解析 OBJ
+    // - 自动将所有子网格转换为 GPU Model
+    // - 自动注入 _modelCache 供后续查询
+    auto sceneRes = ResourceManager::Get().getSceneResource(filepath, false);
+
+    if (!sceneRes || sceneRes->nodes.empty()) {
+        std::cout << "[Scene] Failed to load or empty scene: " << filepath << std::endl;
         return;
     }
 
-    if (meshes.empty()) {
-        std::cout << "[Scene] No meshes found in " << filepath << std::endl;
-        return;
-    }
-
-    // 2. 为每个 SubMesh 创建 GameObject
-    for (const auto& subMesh : meshes)
+    // 2. 构建场景图 (Scene Graph)
+    // 资源管理器给了我们一组纯数据 (Node)，我们需要将其实例化为具体的 GameObject
+    for (const auto& node : sceneRes->nodes)
     {
-        // 创建 GameObject
-        // 注意：subMesh.name 来自 OBJ 文件里的 'o' 或 'g' 标签
-        auto go = new GameObject(subMesh.name);
-
-        // 创建 Model
-        // 我们利用现有的 Model 构造函数 (从顶点/索引数组构建)
-        // 注意：Model 内部会重新计算包围盒
-        auto model = std::make_shared<Model>(subMesh.vertices, subMesh.indices);
+        auto go = new GameObject(node.name);
         
-        // 添加 MeshComponent
-        auto meshComp = go->addComponent<MeshComponent>(model);
+        // node.model 已经是一个初始化好的 GPU 资源指针了
+        auto meshComp = go->addComponent<MeshComponent>(node.model);
+        
+        // 设置组件元数据，以便 Inspector 面板能正确显示
         meshComp->shapeType = MeshShapeType::CustomOBJ;
         
-        // 记录来源路径
-        // 虽然这个路径指向的是整个场景文件，但作为元数据保留是有用的
+        // 记录路径
         strncpy(meshComp->params.objPath, filepath.c_str(), sizeof(meshComp->params.objPath) - 1);
         meshComp->params.objPath[sizeof(meshComp->params.objPath) - 1] = '\0';
-        
-        // [智能 UV 检测]
-        // 如果 SubMesh 标记没有 UV，自动开启 Triplanar Mapping
-        // 这样导入的无 UV 模型（如简单的几何体组合）也能直接贴图
-        if (!subMesh.hasUVs) {
+
+        // 记录子网格名称
+        strncpy(meshComp->params.subMeshName, node.name.c_str(), sizeof(meshComp->params.subMeshName) - 1);
+        meshComp->params.subMeshName[sizeof(meshComp->params.subMeshName) - 1] = '\0';
+
+        // 智能 UV 检测
+        if (!node.model->hasUVs()) {
             meshComp->useTriplanar = true;
-            meshComp->triplanarScale = 0.2f; // 默认缩放，可视情况调整
+            meshComp->triplanarScale = 0.2f;
         } else {
             meshComp->useTriplanar = false;
         }
 
-        // 将新创建的物体加入场景列表
         _gameObjects.push_back(std::unique_ptr<GameObject>(go));
     }
-    
-    std::cout << "[Scene] Imported " << meshes.size() << " objects from " << filepath << std::endl;
+
+    std::cout << "[Scene] Instantiated " << sceneRes->nodes.size() << " objects from " << filepath << std::endl;
 }
 
 void Scene::importSingleMeshFromOBJ(const std::string& filepath)
@@ -228,44 +220,38 @@ void Scene::importSingleMeshFromOBJ(const std::string& filepath)
     std::string name = std::filesystem::path(filepath).stem().string();
     if (name.empty()) name = "Imported Mesh";
 
-    // 2. 加载网格数据 (Flatten 模式，不拆分物体)
-    MeshData meshData;
-    try {
-        // false = 不强制 Flat Shading (默认平滑)
-        meshData = OBJLoader::load(filepath, false);
-    }
-    catch (const std::exception& e) {
-        std::cerr << "[Scene] Failed to load mesh: " << e.what() << std::endl;
-        return;
-    }
+    // 通过 ResourceManager 获取模型
+    // 这里的第三个参数传 "" (空字符串)，表示我们要获取“整个文件”对应的模型
+    // ResourceManager 会先查缓存，如果 importScene 之前注入过 "" 对应的 Key，这里直接命中，耗时 0ms
+    std::shared_ptr<Model> model = ResourceManager::Get().getModel(filepath, false, "");
 
-    if (meshData.vertices.empty()) {
-        std::cerr << "[Scene] Mesh is empty: " << filepath << std::endl;
+    if (!model) {
+        // 如果 ResourceManager 返回空，说明文件不存在或解析失败（它内部已经打印了错误日志）
         return;
     }
 
     // 3. 创建 GameObject
     auto go = new GameObject(name);
 
-    // 4. 创建 Model
-    // 使用顶点和索引数组构建 Model
-    auto model = std::make_shared<Model>(meshData.vertices, meshData.indices);
-
-    // 5. 添加 MeshComponent
+    // 直接使用获取到的 model
     auto meshComp = go->addComponent<MeshComponent>(model);
     
     // 设置类型为 CustomOBJ，这样 Inspector 会显示文件路径槽
     meshComp->shapeType = MeshShapeType::CustomOBJ;
 
-    // 6. 记录文件路径
+    // 5. 记录文件路径
     strncpy(meshComp->params.objPath, filepath.c_str(), sizeof(meshComp->params.objPath) - 1);
     meshComp->params.objPath[sizeof(meshComp->params.objPath) - 1] = '\0';
 
+    // Single Mesh 模式下，subMeshName 应该为空
+    // 这样下次点击 Flat Shade 时，Inspector 传给 ResourceManager 的也是空名，依然能命中缓存
+    memset(meshComp->params.subMeshName, 0, sizeof(meshComp->params.subMeshName));
+
     // 7. [智能 UV 检测]
     // 如果加载的数据里没有 UV，自动开启 Triplanar Mapping
-    if (!meshData.hasUVs) {
+    if (!model->hasUVs()) {
         meshComp->useTriplanar = true;
-        meshComp->triplanarScale = 0.2f; // 默认缩放值，可视情况调整
+        meshComp->triplanarScale = 0.2f; 
     } else {
         meshComp->useTriplanar = false;
     }

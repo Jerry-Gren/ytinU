@@ -63,6 +63,7 @@ SceneRoaming::SceneRoaming(const Options &options) : Application(options)
     _hierarchyPanel = std::make_unique<HierarchyPanel>();
     _inspectorPanel = std::make_unique<InspectorPanel>();
     _projectPanel = std::make_unique<ProjectPanel>();
+    _envPanel = std::make_unique<EnvironmentPanel>();
 
     initImGui();
     // initSceneFBO 不需要在这里调，第一次 renderUI 时会根据窗口大小自动调
@@ -289,6 +290,9 @@ void SceneRoaming::renderUI()
         
         // 3. Project
         _projectPanel->onImGuiRender();
+
+        // 4. Environment
+        _envPanel->onImGuiRender(_scene.get(), _renderer.get());
     }
 
     // 6. 渲染结束 (保持不变)

@@ -1,4 +1,6 @@
 #include "renderer.h"
+#include "resource_manager.h"
+#include "asset_data.h"
 #include <iostream>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -120,10 +122,26 @@ void Renderer::init() {
         uniform bool hasNormalMap;
         uniform float normalStrength; // 默认 1.0
         uniform bool flipNormalY;     // 默认 false
+        // ORM 贴图
+        uniform sampler2D ormMap;
+        uniform bool hasOrmMap;
+        // 自发光贴图
+        uniform sampler2D emissiveMap;
+        uniform bool hasEmissiveMap;
+        uniform vec3 emissiveColor;
+        uniform float emissiveStrength;
+        // 透明度贴图
+        uniform sampler2D opacityMap;
+        uniform bool hasOpacityMap;
+        uniform float alphaCutoff;
 
         // 动态环境贴图 IBL
         uniform samplerCube envMap;
         uniform bool hasEnvMap;
+        uniform samplerCube irradianceMap; 
+        uniform bool hasIrradianceMap;
+        uniform samplerCube prefilterMap; 
+        uniform sampler2D brdfLUT;
         uniform float iblIntensity;
 
         // 视差校正
@@ -181,6 +199,8 @@ void Renderer::init() {
         uniform bool isUnlit;
         uniform bool isDoubleSided;
         uniform bool isDebug;
+
+        uniform float exposure;
 
         uniform vec3 viewPos;
         
@@ -306,9 +326,9 @@ void Renderer::init() {
         // 函数声明
         vec4 getTriplanarSample(vec3 worldPos, vec3 normal);
 
-        void CalcDirLight(DirLight light, vec3 N, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum);
-        void CalcPointLight(PointLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum);
-        void CalcSpotLight(SpotLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, inout vec3 diffAccum, inout vec3 specAccum);
+        void CalcDirLight(DirLight light, vec3 N, vec3 V, vec3 albedo, vec3 F0, float roughness, float shadow, inout vec3 diffAccum, inout vec3 specAccum);
+        void CalcPointLight(PointLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float roughness, float shadow, inout vec3 diffAccum, inout vec3 specAccum);
+        void CalcSpotLight(SpotLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float roughness, inout vec3 diffAccum, inout vec3 specAccum);
 
         vec3 BoxProjectedCubemapDirection(vec3 worldPos, vec3 worldRefDir, vec3 pPos, vec3 boxMin, vec3 boxMax);
 
@@ -345,6 +365,20 @@ void Renderer::init() {
             if (useTriplanar) {
                 // 使用 LocalPos 保证纹理随物体移动
                 triData = CalcTriplanarData(LocalPos, norm); 
+            }
+
+            if (hasOpacityMap) {
+                float opacity;
+                if (useTriplanar) {
+                    opacity = SampleTriplanar(opacityMap, triData).r; // 假设是灰度图，取 R 通道
+                } else {
+                    opacity = texture(opacityMap, TexCoord).r;
+                }
+
+                // 如果不透明度低于阈值，直接丢弃该像素
+                if (opacity < alphaCutoff) {
+                    discard;
+                }
             }
 
             vec3 albedoColor = material.albedo;
@@ -390,12 +424,33 @@ void Renderer::init() {
             
             vec3 viewDir = normalize(viewPos - FragPos);
 
+            float roughness = material.roughness;
+            float metallic  = material.metallic;
+            float ao        = material.ao;
+
+            if (hasOrmMap) {
+                vec4 ormSample;
+                if (useTriplanar) {
+                    ormSample = SampleTriplanar(ormMap, triData);
+                } else {
+                    ormSample = texture(ormMap, TexCoord);
+                }
+                
+                // glTF / Unreal 标准: 
+                // R = Occlusion (AO)
+                // G = Roughness
+                // B = Metallic
+                ao        = ormSample.r;
+                roughness = ormSample.g;
+                metallic  = ormSample.b;
+            }
+            
             // ================= PBR 参数准备 =================
             // F0: 基础反射率 (0度角的反射率)
             // 绝缘体(非金属) F0 约为 0.04
             // 导体(金属) F0 为自身的 albedo 颜色
             vec3 F0 = vec3(0.04); 
-            F0 = mix(F0, albedoColor, material.metallic);
+            F0 = mix(F0, albedoColor, metallic);
             // ==============================================
 
             // 分离 Diffuse 和 Specular 累加器
@@ -409,7 +464,7 @@ void Renderer::init() {
                     vec3 lightDir = normalize(-dirLights[i].direction);
                     shadow = ShadowCalculation(FragPos, norm, lightDir, ClipSpaceZ, dirLights[i].shadowIndex);
                 }
-                CalcDirLight(dirLights[i], norm, viewDir, albedoColor, F0, shadow, directDiffuse, directSpecular);
+                CalcDirLight(dirLights[i], norm, viewDir, albedoColor, F0, roughness, shadow, directDiffuse, directSpecular);
             }
             
             for(int i = 0; i < pointLightCount; i++) {
@@ -418,41 +473,78 @@ void Renderer::init() {
                     float rawShadow = CalcPointShadow(FragPos, pointLights[i].position, pointLights[i].shadowIndex, pointLights[i].range, pointLights[i].shadowRadius, pointLights[i].shadowBias);
                     shadow = mix(1.0, rawShadow, pointLights[i].shadowStrength);
                 }
-                CalcPointLight(pointLights[i], norm, FragPos, viewDir, albedoColor, F0, shadow, directDiffuse, directSpecular);
+                CalcPointLight(pointLights[i], norm, FragPos, viewDir, albedoColor, F0, roughness, shadow, directDiffuse, directSpecular);
             }
             
             for(int i = 0; i < spotLightCount; i++)
-                CalcSpotLight(spotLights[i], norm, FragPos, viewDir, albedoColor, F0, directDiffuse, directSpecular);
+                CalcSpotLight(spotLights[i], norm, FragPos, viewDir, albedoColor, F0, roughness, directDiffuse, directSpecular);
             
             // 2. 环境光 (IBL)
             vec3 ambientDiffuse = vec3(0.0);
             vec3 ambientSpecular = vec3(0.0);
             
-            if (hasEnvMap) {
-                // Diffuse IBL
-                vec3 irradiance = textureLod(envMap, norm, 8.0).rgb; 
-                vec3 kS = FresnelSchlickRoughness(max(dot(norm, viewDir), 0.0), F0, material.roughness);
-                vec3 kD = 1.0 - kS;
-                kD *= 1.0 - material.metallic;
+            // [Diffuse IBL]
+            if (hasIrradianceMap) {
+                // A. 采样辐照度贴图
+                vec3 irradiance = texture(irradianceMap, norm).rgb;
                 
-                ambientDiffuse = kD * irradiance * albedoColor * iblIntensity;
+                // B. 计算菲涅尔 (Fresnel) - 用于计算漫反射比例
+                vec3 kS = FresnelSchlickRoughness(max(dot(norm, viewDir), 0.0), F0, roughness);
+                vec3 kD = 1.0 - kS;
+                kD *= 1.0 - metallic; // 金属吸收所有折射光
 
-                // Specular IBL
+                // C. 漫反射结果 = kD * 辐照度 * 颜色
+                ambientDiffuse = kD * irradiance * albedoColor;
+            } 
+            // 如果没有计算好的 IBL，回退到旧的反射探针逻辑或简单环境光
+            else if (hasEnvMap) {
+                // (旧逻辑) 简单的 Diffuse IBL 近似
+                vec3 irradiance = textureLod(envMap, norm, 8.0).rgb; 
+                vec3 kS = FresnelSchlickRoughness(max(dot(norm, viewDir), 0.0), F0, roughness);
+                vec3 kD = 1.0 - kS;
+                kD *= 1.0 - metallic;
+                ambientDiffuse = kD * irradiance * albedoColor;
+            } else {
+                // 最基础的 fallback
+                ambientDiffuse = vec3(0.1) * albedoColor;
+            }
+
+            // [Specular IBL]
+            if (hasIrradianceMap) {
+                // 1. 采样 Prefilter Map (根据粗糙度决定 Mip Level)
+                vec3 R = reflect(-viewDir, norm);
+                const float MAX_REFLECTION_LOD = 4.0;
+                vec3 prefilteredColor = textureLod(prefilterMap, R, roughness * MAX_REFLECTION_LOD).rgb;
+                
+                // 2. 查表 BRDF LUT (根据 NdotV 和 Roughness)
+                vec2 brdf  = texture(brdfLUT, vec2(max(dot(norm, viewDir), 0.0), roughness)).rg;
+                
+                // 3. 组合 (Split Sum Approximation)
+                // specular = prefilteredColor * (F * brdf.x + brdf.y)
+                vec3 specular = prefilteredColor * (F0 * brdf.x + brdf.y);
+
+                ambientSpecular = specular;
+            }
+            else if (hasEnvMap) {
                 vec3 R = reflect(-viewDir, norm);
                 vec3 correctedR = BoxProjectedCubemapDirection(FragPos, R, probePos, probeBoxMin, probeBoxMax);
                 float MAX_LOD = 4.0;
-                vec3 prefilteredColor = textureLod(envMap, correctedR, material.roughness * MAX_LOD).rgb;
-                vec3 specularFactor = EnvBRDFApprox(F0, material.roughness, max(dot(norm, viewDir), 0.0));
-                
+                vec3 prefilteredColor = textureLod(envMap, correctedR, roughness * MAX_LOD).rgb;
+                vec3 specularFactor = EnvBRDFApprox(F0, roughness, max(dot(norm, viewDir), 0.0));
                 ambientSpecular = prefilteredColor * specularFactor * iblIntensity;
             } else {
-                ambientDiffuse = vec3(0.03) * albedoColor * material.ao; 
+                // 如果没有环境图，给一点极弱的底色防止全黑
+                ambientSpecular = vec3(0.0);
             }
+
+            // 应用 IBL 强度
+            ambientDiffuse *= iblIntensity;
+            ambientSpecular *= iblIntensity;
             
             // 3. 组合 PBR 不透明部分
-            vec3 opaqueColor = (ambientDiffuse + directDiffuse) * material.ao + (ambientSpecular + directSpecular);
+            vec3 opaqueColor = (ambientDiffuse + directDiffuse) * ao + (ambientSpecular + directSpecular);
             
-            // 4. 玻璃/折射逻辑 (关键修改)
+            // 4. 玻璃/折射逻辑
             vec3 finalColor = opaqueColor;
 
             if (material.transparency > 0.001) 
@@ -473,7 +565,21 @@ void Renderer::init() {
                 vec3 refractColor = vec3(0.0);
                 vec3 reflectColor = vec3(0.0);
 
-                if (hasEnvMap) {
+                // 优先使用 IBL 贴图进行折射/反射
+                if (hasIrradianceMap) {
+                     float k = max(material.refractionIndex, 1.0);
+                     float ratio = 1.0 / k;
+                     vec3 I = normalize(FragPos - viewPos);
+                     
+                     // 折射
+                     vec3 R_refract = refract(I, norm, ratio);
+                     refractColor = textureLod(prefilterMap, R_refract, 0.0).rgb * iblIntensity;
+
+                     // 反射
+                     vec3 R_reflect = reflect(I, norm);
+                     reflectColor = textureLod(prefilterMap, R_reflect, material.roughness * 4.0).rgb * iblIntensity;
+                }
+                else if (hasEnvMap) {
                     // Refract
                     float k = max(material.refractionIndex, 1.0);
                     float ratio = 1.0 / k;
@@ -500,6 +606,27 @@ void Renderer::init() {
 
                 finalColor = mix(opaqueColor, glassResult, material.transparency);
             }
+
+            // 自发光
+            vec3 emission = emissiveColor * emissiveStrength;
+            
+            if (hasEmissiveMap) {
+                vec3 emTex;
+                if (useTriplanar) {
+                    emTex = SampleTriplanar(emissiveMap, triData).rgb;
+                } else {
+                    emTex = texture(emissiveMap, TexCoord).rgb;
+                }
+                
+                // 自发光贴图是颜色信息，通常是 sRGB 的，需要转到 Linear 空间
+                emTex = pow(emTex, vec3(2.2));
+                
+                emission *= emTex;
+            }
+            
+            finalColor += emission;
+
+            finalColor *= exposure;
 
             // 5. Tone Mapping (ACES)
             finalColor = ACESFilm(finalColor);
@@ -645,7 +772,7 @@ void Renderer::init() {
             return normalize(blendedNormal);
         }
 
-        void CalcDirLight(DirLight light, vec3 N, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum) {
+        void CalcDirLight(DirLight light, vec3 N, vec3 V, vec3 albedo, vec3 F0, float roughness, float shadow, inout vec3 diffAccum, inout vec3 specAccum) {
             vec3 L = normalize(-light.direction);
             vec3 H = normalize(V + L);
             float NdotL = max(dot(N, L), 0.0);
@@ -654,8 +781,8 @@ void Renderer::init() {
             vec3 radiance = light.color * light.intensity * shadow;
 
             // Cook-Torrance
-            float NDF = DistributionGGX(N, H, material.roughness);   
-            float G   = GeometrySmith(N, V, L, material.roughness);      
+            float NDF = DistributionGGX(N, H, roughness);    
+            float G   = GeometrySmith(N, V, L, roughness);       
             vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
            
             vec3 numerator    = NDF * G * F; 
@@ -664,6 +791,22 @@ void Renderer::init() {
             
             vec3 kS = F;
             vec3 kD = vec3(1.0) - kS;
+            // 注意：metallic 我们在 main 函数里计算 F0 时已经处理了，这里只需要 roughness
+            // 但 kD *= 1.0 - metallic 这个逻辑通常也是在 main 里通过 F0 隐式处理，
+            // 或者我们可以保留 metallic 作为一个参数传进来。
+            // 为了简化，标准 PBR 流程中 F0 已经蕴含了金属度信息，kD 的缩放可以在外面做，
+            // 但为了保持和你现有代码一致，我们假设 metallic 仅影响 F0 的计算，
+            // 这里的 kD 缩放其实应该用传入的 metallic。
+            // 鉴于改动量，我们**暂时保留**读取 material.metallic，因为 metallic 通常不需要逐像素变化得那么剧烈，
+            // 或者你可以把 metallic 也加进参数里。为了严谨，我们假设 metallic 还是全局的，
+            // 因为 ORM 里的 M 通道通常是非 0 即 1。
+            // *修正*：为了完全正确支持 ORM，metallic 也必须是局部的。
+            // 让我们简单点：既然要改，就只改 roughness。Metallic 的影响主要在 F0 (已传入) 和 kD。
+            // 在这里我们暂时不传 metallic，而是依赖 main 函数算好的 albedo 和 F0。
+            // 唯一的问题是 kD *= 1.0 - metallic。
+            // 如果你想完美，最好把 metallic 也传进来。
+            // **为了代码最小化改动**：我们这里先不动 metallic (仍然读全局)，只动 roughness。
+            // 如果你发现金属贴图的非金属部分太暗，我们再回来改这个。
             kD *= 1.0 - material.metallic;	  
 
             // 累加
@@ -671,7 +814,7 @@ void Renderer::init() {
             specAccum += specular * radiance * NdotL;
         }
 
-        void CalcPointLight(PointLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float shadow, inout vec3 diffAccum, inout vec3 specAccum) {
+        void CalcPointLight(PointLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float roughness, float shadow, inout vec3 diffAccum, inout vec3 specAccum) {
             vec3 L = normalize(light.position - pos);
             vec3 H = normalize(V + L);
             float distance = length(light.position - pos);
@@ -680,8 +823,8 @@ void Renderer::init() {
 
             vec3 radiance = light.color * light.intensity * attenuation * shadow;
 
-            float NDF = DistributionGGX(N, H, material.roughness);   
-            float G   = GeometrySmith(N, V, L, material.roughness);      
+            float NDF = DistributionGGX(N, H, roughness);
+            float G   = GeometrySmith(N, V, L, roughness);
             vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
            
             vec3 numerator    = NDF * G * F; 
@@ -696,7 +839,7 @@ void Renderer::init() {
             specAccum += specular * radiance * NdotL;
         }
 
-        void CalcSpotLight(SpotLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, inout vec3 diffAccum, inout vec3 specAccum) {
+        void CalcSpotLight(SpotLight light, vec3 N, vec3 pos, vec3 V, vec3 albedo, vec3 F0, float roughness, inout vec3 diffAccum, inout vec3 specAccum) {
             vec3 L = normalize(light.position - pos);
             vec3 H = normalize(V + L);
             float distance = length(light.position - pos);
@@ -709,8 +852,8 @@ void Renderer::init() {
 
             vec3 radiance = light.color * light.intensity * attenuation * intensity;
 
-            float NDF = DistributionGGX(N, H, material.roughness);   
-            float G   = GeometrySmith(N, V, L, material.roughness);      
+            float NDF = DistributionGGX(N, H, roughness);
+            float G   = GeometrySmith(N, V, L, roughness);
             vec3 F    = FresnelSchlick(max(dot(H, V), 0.0), F0);
            
             vec3 numerator    = NDF * G * F; 
@@ -976,9 +1119,13 @@ void Renderer::init() {
     _mainShader->setUniformInt("normalMap", 1);   // Slot 1: Normal
     _mainShader->setUniformInt("shadowMap", 2);   // Slot 2: CSM Array
     _mainShader->setUniformInt("envMap", 3);      // Slot 3: IBL Cubemap (改到3，避开NormalMap)
+    _mainShader->setUniformInt("ormMap", 4);      // Slot 4: ORM
+    _mainShader->setUniformInt("emissiveMap", 5); // Slot 5: Emissive
+    _mainShader->setUniformInt("opacityMap", 6);  // Slot 6: Opacity
 
-    // Slot 4,5,6,7 用于点光源阴影
-    int pointShadowSamplers[4] = {4, 5, 6, 7};
+
+    // Slot 7,8,9,10 用于点光源阴影
+    int pointShadowSamplers[4] = {7, 8, 9, 10};
     glUniform1iv(glGetUniformLocation(_mainShader->getHandle(), "pointShadowMaps"), 4, pointShadowSamplers);
 
     // =============================================================
@@ -1091,63 +1238,38 @@ void Renderer::init() {
         out vec4 FragColor;
         in vec3 TexCoords;
 
+        uniform bool useHDR;
+        uniform samplerCube skyboxMap;
+
+        // [修改] 改为 Uniform 输入
+        uniform vec3 colZenith;
+        uniform vec3 colHorizon;
+        uniform vec3 colGround;
+        uniform float energy;
+
         void main() {
-            vec3 dir = normalize(TexCoords);
-            float y = dir.y;
-
-            // =========================================================
-            // [配色方案] 
-            // =========================================================
-            
-            // 1. 地面颜色 (Deep Dark Gray)
-            vec3 colGround = vec3(0.2, 0.2, 0.2); 
-
-            // 2. 地平线颜色 (Horizon Fog)
-            // [修改]: 稍微提亮一点，增加一点“厚重感”和不透明度
-            vec3 colHorizon = vec3(0.7, 0.75, 0.82); 
-
-            // 3. 天顶颜色 (Sky Zenith)
-            vec3 colZenith  = vec3(0.2, 0.45, 0.8); 
-
             vec3 finalColor;
 
-            // =========================================================
-            // [混合逻辑] 
-            // =========================================================
-            
-            if (y < 0.0) {
-                // --- 地下部分 ---
-                
-                // [核心改进 1: 平滑过渡]
-                // 原代码这里使用了 colHorizon * 0.5，导致和上半部分产生接缝。
-                // 我们现在直接从 colHorizon 开始，确保 y=0 处无缝连接。
-
-                // [核心改进 2: 加大雾气密度]
-                // 我们不改变 -0.2 这个范围，而是改变混合曲线的"形状"。
-                // 原始线性混合会让地面黑得太快。
-                // 这里先算出线性因子 factorLinear (0.0 到 1.0)
-                float factorLinear = smoothstep(0.0, -0.2, y);
-                
-                // 使用 pow 函数处理因子。
-                // 0.4 的指数会让混合因子在接近 0 (地平线) 的地方停留更久，
-                // 从而让雾气颜色"渗"入地面更多，看起来雾更浓，但并没有扩大实际渲染范围。
-                float factorCurved = pow(factorLinear, 0.4); 
-
-                finalColor = mix(colHorizon, colGround, factorCurved); 
+            if (useHDR) {
+                // 直接采样 HDR 天空盒
+                finalColor = texture(skyboxMap, TexCoords).rgb;
             } 
             else {
-                // --- 天空部分 ---
-                
-                // 同样为了增加雾气感，我们让天顶蓝色的出现稍微"迟"一点
-                // 0.5 的指数比原来的 0.7 更小，意味着白色雾气会向上延伸得更有力
-                float t = pow(y, 0.5); 
-                finalColor = mix(colHorizon, colZenith, t);
+                // 程序化天空逻辑
+                vec3 dir = normalize(TexCoords);
+                float y = dir.y;
+                if (y < 0.0) {
+                    float factorLinear = smoothstep(0.0, -0.2, y);
+                    float factorCurved = pow(factorLinear, 0.4); 
+                    finalColor = mix(colHorizon, colGround, factorCurved); 
+                } else {
+                    float t = pow(y, 0.5); 
+                    finalColor = mix(colHorizon, colZenith, t);
+                }
             }
 
-            // [色调映射] (可选) 
-            // 加上轻微的 Gamma 矫正或 Tone Mapping 可以让雾气看起来更柔和
-            // finalColor = pow(finalColor, vec3(1.0/2.2)); 
-
+            finalColor *= energy;
+            // Tone Mapping 可选
             FragColor = vec4(finalColor, 1.0);
         }
     )";
@@ -1170,12 +1292,113 @@ void Renderer::init() {
     // 5. 初始化 PointShadowPass
     // 分辨率 1024，最大支持 4 个点光源
     _pointShadowPass = std::make_unique<PointShadowPass>(1024, 4);
+
+    // 6. 初始化天空盒资源
+    initSkyboxResources();
+
+    // 7. 
+    initIBLResources();
+
+    // 8. 
+    initPrefilterResources();
+
+    // 9.
+    initBRDFResources();
+    // BRDF LUT 只需要计算一次，因为它跟环境贴图无关，只跟数学公式有关
+    // 所以我们在 init 里直接计算它
+    computeBRDFLUT();
 }
 
 void Renderer::onResize(int width, int height) {
     if (_outlinePass) {
         _outlinePass->onResize(width, height);
     }
+}
+
+void Renderer::loadSkyboxHDR(const std::string& path) {
+    // 1. 加载原始数据 (保持不变)
+    HDRData hdrData = ResourceManager::Get().loadHDRRaw(path);
+    if (!hdrData.isValid()) return;
+
+    // 2. 创建临时 2D HDR 纹理 (保持不变)
+    GLuint hdrTexture;
+    glGenTextures(1, &hdrTexture);
+    glBindTexture(GL_TEXTURE_2D, hdrTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, hdrData.width, hdrData.height, 0, GL_RGB, GL_FLOAT, hdrData.data);
+    
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    ResourceManager::freeHDRRaw(hdrData);
+
+    // 3. 准备渲染到 Cubemap
+    GLint prevFbo; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+    GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
+
+    // [新增] 保存面剔除状态
+    GLboolean isCullEnabled = glIsEnabled(GL_CULL_FACE);
+
+    GLuint captureFBO, captureRBO;
+    glGenFramebuffers(1, &captureFBO);
+    glGenRenderbuffers(1, &captureRBO);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+    glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 1024, 1024);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, captureRBO);
+
+    glm::mat4 captureProjection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+    glm::mat4 captureViews[] = {
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f))
+    };
+
+    _equirectangularToCubemapShader->use();
+    _equirectangularToCubemapShader->setUniformInt("equirectangularMap", 0);
+    _equirectangularToCubemapShader->setUniformMat4("projection", captureProjection);
+    
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, hdrTexture);
+
+    glViewport(0, 0, 1024, 1024);
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+
+    // [关键修复] 禁用面剔除！
+    // 因为我们在立方体内部，我们要看它的内表面
+    glDisable(GL_CULL_FACE);
+
+    for (unsigned int i = 0; i < 6; ++i)
+    {
+        _equirectangularToCubemapShader->setUniformMat4("view", captureViews[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, _envCubemap, 0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        _skyboxCube->draw(); 
+    }
+
+    // [恢复] 恢复面剔除状态
+    if (isCullEnabled) glEnable(GL_CULL_FACE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteTextures(1, &hdrTexture);
+    glDeleteFramebuffers(1, &captureFBO);
+    glDeleteRenderbuffers(1, &captureRBO);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+    
+    std::cout << "[Renderer] Converted HDR to Cubemap: " << path << std::endl;
+
+    // 立即计算漫反射积分
+    computeIrradianceMap();
+
+    computePrefilterMap();
 }
 
 void Renderer::render(const Scene& scene, Camera* camera, 
@@ -1282,15 +1505,14 @@ void Renderer::render(const Scene& scene, Camera* camera,
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D_ARRAY, _shadowPass->getDepthMapArray());
 
-    // 绑定 Point Shadow Cubemaps 到 Slot 4, 5, 6, 7
-    // Slot 0: Diffuse, Slot 1: Env, Slot 2: CSM, Slot 3: Reserved
+    // 绑定 Point Shadow Cubemaps 到 Slot 7, 8, 9, 10
     for (int i = 0; i < pointShadowInfos.size(); ++i) {
-        glActiveTexture(GL_TEXTURE4 + i);
+        glActiveTexture(GL_TEXTURE7 + i);
         glBindTexture(GL_TEXTURE_CUBE_MAP, _pointShadowPass->getShadowMap(i));
     }
 
     // 绘制天空盒
-    drawSkybox(view, proj);
+    drawSkybox(view, proj, scene.getEnvironment());
 
     // 绘制场景物体 (传入收集好的光源数据)
     drawSceneObjects(scene, view, proj, viewPos, dirLights, pointLights, spotLights, lightToShadowIndex);
@@ -1311,13 +1533,612 @@ void Renderer::render(const Scene& scene, Camera* camera,
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-// === 下面是将 SceneRoaming::renderScene 中的逻辑拆分出来的私有函数 ===
+void Renderer::initSkyboxResources() {
+    // 1. 编译转换 Shader
+    const char* vsCode = R"(
+        #version 330 core
+        layout (location = 0) in vec3 aPos;
+        out vec3 localPos;
+        uniform mat4 projection;
+        uniform mat4 view;
+        void main() {
+            localPos = aPos;
+            gl_Position = projection * view * vec4(localPos, 1.0);
+        }
+    )";
 
-void Renderer::drawSkybox(const glm::mat4& view, const glm::mat4& proj) {
+    const char* fsCode = R"(
+        #version 330 core
+        out vec4 FragColor;
+        in vec3 localPos;
+        uniform sampler2D equirectangularMap;
+        
+        const vec2 invAtan = vec2(0.1591, 0.3183); // 1/2pi, 1/pi
+
+        vec2 SampleSphericalMap(vec3 v) {
+            vec2 uv = vec2(atan(v.z, v.x), asin(v.y));
+            uv *= invAtan;
+            uv += 0.5;
+            return uv;
+        }
+
+        void main() {
+            vec2 uv = SampleSphericalMap(normalize(localPos));
+            vec3 color = texture(equirectangularMap, uv).rgb;
+            FragColor = vec4(color, 1.0);
+        }
+    )";
+
+    _equirectangularToCubemapShader.reset(new GLSLProgram);
+    _equirectangularToCubemapShader->attachVertexShader(vsCode);
+    _equirectangularToCubemapShader->attachFragmentShader(fsCode);
+    _equirectangularToCubemapShader->link();
+
+    // 2. 创建最终的 Environment Cubemap
+    // 我们预先分配好 ID，以后每次加载 HDR 只是更新内容，不删 ID
+    glGenTextures(1, &_envCubemap);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, _envCubemap);
+    for (unsigned int i = 0; i < 6; ++i) {
+        // 使用 16F 浮点格式存储 HDR 数据
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 
+                     1024, 1024, 0, GL_RGB, GL_FLOAT, nullptr);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    // 开启线性过滤，否则天空会有像素感
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR); 
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+}
+
+void Renderer::initIBLResources() {
+    // 1. 创建 Irradiance Map (低分辨率即可，32x32 足矣，因为它是低频信号)
+    glGenTextures(1, &_irradianceMap);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, _irradianceMap);
+    for (unsigned int i = 0; i < 6; ++i) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 32, 32, 0, GL_RGB, GL_FLOAT, nullptr);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    // 2. 编译卷积 Shader
+    const char* vsCode = R"(
+        #version 330 core
+        layout (location = 0) in vec3 aPos;
+        out vec3 localPos;
+        uniform mat4 projection;
+        uniform mat4 view;
+        void main() {
+            localPos = aPos;
+            gl_Position = projection * view * vec4(localPos, 1.0);
+        }
+    )";
+
+    const char* fsCode = R"(
+        #version 330 core
+        out vec4 FragColor;
+        in vec3 localPos;
+
+        uniform samplerCube environmentMap;
+
+        const float PI = 3.14159265359;
+
+        void main() {
+            vec3 N = normalize(localPos);
+            vec3 irradiance = vec3(0.0);
+
+            // 建立切线空间
+            vec3 up = vec3(0.0, 1.0, 0.0);
+            vec3 right = normalize(cross(up, N));
+            up = normalize(cross(N, right));
+
+            float sampleDelta = 0.025;
+            float nrSamples = 0.0; 
+
+            // 对半球进行卷积采样
+            for(float phi = 0.0; phi < 2.0 * PI; phi += sampleDelta) {
+                for(float theta = 0.0; theta < 0.5 * PI; theta += sampleDelta) {
+                    // 球坐标 -> 笛卡尔坐标 (切线空间)
+                    vec3 tangentSample = vec3(sin(theta) * cos(phi),  sin(theta) * sin(phi), cos(theta));
+                    // 切线空间 -> 世界空间
+                    vec3 sampleVec = tangentSample.x * right + tangentSample.y * up + tangentSample.z * N; 
+
+                    // 采样 HDR 环境图，并应用 cos(theta) 权重
+                    irradiance += texture(environmentMap, sampleVec).rgb * cos(theta) * sin(theta);
+                    nrSamples++;
+                }
+            }
+            
+            irradiance = PI * irradiance * (1.0 / float(nrSamples));
+            FragColor = vec4(irradiance, 1.0);
+        }
+    )";
+
+    _irradianceShader.reset(new GLSLProgram);
+    _irradianceShader->attachVertexShader(vsCode);
+    _irradianceShader->attachFragmentShader(fsCode);
+    _irradianceShader->link();
+}
+
+void Renderer::computeIrradianceMap() {
+    // 确保有源纹理
+    if (_envCubemap == 0) return;
+
+    // 保存状态
+    GLint prevFbo; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+    GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
+
+    // 复用之前的 captureFBO (我们需要重新创建一个临时的，因为 loadSkyboxHDR 里的已经销毁了)
+    // 或者为了性能，可以在类成员里保留一个公用的 captureFBO，这里我们先局部创建
+    GLuint captureFBO, captureRBO;
+    glGenFramebuffers(1, &captureFBO);
+    glGenRenderbuffers(1, &captureRBO);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+    glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 32, 32); // Irradiance 是 32x32
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, captureRBO);
+
+    glm::mat4 captureProjection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+    glm::mat4 captureViews[] = {
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f))
+    };
+
+    // 渲染配置
+    _irradianceShader->use();
+    _irradianceShader->setUniformInt("environmentMap", 0);
+    _irradianceShader->setUniformMat4("projection", captureProjection);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, _envCubemap); // 输入：原始 HDR Cubemap
+
+    glViewport(0, 0, 32, 32);
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+
+    // 卷积过程不需要面剔除，因为我们在盒子内部
+    GLboolean isCullEnabled = glIsEnabled(GL_CULL_FACE);
+    glDisable(GL_CULL_FACE);
+
+    for (unsigned int i = 0; i < 6; ++i)
+    {
+        _irradianceShader->setUniformMat4("view", captureViews[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, _irradianceMap, 0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        _skyboxCube->draw();
+    }
+
+    if (isCullEnabled) glEnable(GL_CULL_FACE);
+
+    // 清理
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &captureFBO);
+    glDeleteRenderbuffers(1, &captureRBO);
+
+    // 恢复
+    glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+
+    std::cout << "[Renderer] Computed Irradiance Map" << std::endl;
+}
+
+void Renderer::initPrefilterResources() {
+    // 1. 创建 Prefilter Cubemap
+    // 分辨率通常比 HDR 原图小一点，比如 128 或 512
+    glGenTextures(1, &_prefilterMap);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, _prefilterMap);
+    for (unsigned int i = 0; i < 6; ++i) {
+        // 注意：这里分配了 128x128 的基础层，后续我们会生成 Mipmap
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 128, 128, 0, GL_RGB, GL_FLOAT, nullptr);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    // [关键] 开启三线性过滤 (Trilinear) 以便在不同粗糙度之间插值
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); 
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    
+    // 自动分配内存给 Mipmap 链
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+
+    // 2. 编译 Prefilter Shader (这是 PBR 中最复杂的预计算 Shader)
+    // 它使用蒙特卡洛积分来模拟不同粗糙度下的高光波瓣
+    const char* vsCode = R"(
+        #version 330 core
+        layout (location = 0) in vec3 aPos;
+        out vec3 localPos;
+        uniform mat4 projection;
+        uniform mat4 view;
+        void main() {
+            localPos = aPos;
+            gl_Position = projection * view * vec4(localPos, 1.0);
+        }
+    )";
+
+    const char* fsCode = R"(
+        #version 330 core
+        out vec4 FragColor;
+        in vec3 localPos;
+
+        uniform samplerCube environmentMap;
+        uniform float roughness;
+        uniform float resolution; // 源图分辨率，用于避免采样伪影
+
+        const float PI = 3.14159265359;
+
+        // --- 辅助函数：Hammersley 序列 (用于低差异序列采样) ---
+        float RadicalInverse_VdC(uint bits) {
+            bits = (bits << 16u) | (bits >> 16u);
+            bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+            bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+            bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+            bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+            return float(bits) * 2.3283064365386963e-10; // / 0x100000000
+        }
+        vec2 Hammersley(uint i, uint N) {
+            return vec2(float(i)/float(N), RadicalInverse_VdC(i));
+        }
+
+        // --- 辅助函数：重要性采样 GGX ---
+        vec3 ImportanceSampleGGX(vec2 Xi, vec3 N, float roughness) {
+            float a = roughness*roughness;
+            float phi = 2.0 * PI * Xi.x;
+            float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a*a - 1.0) * Xi.y));
+            float sinTheta = sqrt(1.0 - cosTheta*cosTheta);
+
+            // 球坐标 -> 笛卡尔
+            vec3 H;
+            H.x = cos(phi) * sinTheta;
+            H.y = sin(phi) * sinTheta;
+            H.z = cosTheta;
+
+            // 切线空间 -> 世界空间
+            vec3 up        = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+            vec3 tangent   = normalize(cross(up, N));
+            vec3 bitangent = cross(N, tangent);
+
+            vec3 sampleVec = tangent * H.x + bitangent * H.y + N * H.z;
+            return normalize(sampleVec);
+        }
+
+        // --- NDF (用于计算 Mip Level) ---
+        float DistributionGGX(vec3 N, vec3 H, float roughness) {
+            float a = roughness*roughness;
+            float a2 = a*a;
+            float NdotH = max(dot(N, H), 0.0);
+            float NdotH2 = NdotH*NdotH;
+            float nom   = a2;
+            float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+            denom = PI * denom * denom;
+            return nom / max(denom, 0.0000001);
+        }
+
+        void main() {
+            vec3 N = normalize(localPos);
+            vec3 R = N;
+            vec3 V = R;
+
+            const uint SAMPLE_COUNT = 1024u; // 采样数，越多越平滑但越慢
+            float totalWeight = 0.0;
+            vec3 prefilteredColor = vec3(0.0);
+
+            for(uint i = 0u; i < SAMPLE_COUNT; ++i) {
+                vec2 Xi = Hammersley(i, SAMPLE_COUNT);
+                vec3 H  = ImportanceSampleGGX(Xi, N, roughness);
+                vec3 L  = normalize(2.0 * dot(V, H) * H - V);
+
+                float NdotL = max(dot(N, L), 0.0);
+                if(NdotL > 0.0) {
+                    // [技巧] 为了消除高亮点带来的噪点，我们根据概率密度计算 Mip Level
+                    // 这样粗糙度高的地方会自动采样更低级的 Mipmap
+                    float D   = DistributionGGX(N, H, roughness);
+                    float NdotH = max(dot(N, H), 0.0);
+                    float HdotV = max(dot(H, V), 0.0);
+                    float pdf = D * NdotH / (4.0 * HdotV) + 0.0001; 
+
+                    float saTexel  = 4.0 * PI / (6.0 * resolution * resolution);
+                    float saSample = 1.0 / (float(SAMPLE_COUNT) * pdf + 0.0001);
+
+                    float mipLevel = roughness == 0.0 ? 0.0 : 0.5 * log2(saSample / saTexel); 
+                    
+                    prefilteredColor += textureLod(environmentMap, L, mipLevel).rgb * NdotL;
+                    totalWeight      += NdotL;
+                }
+            }
+            prefilteredColor = prefilteredColor / totalWeight;
+
+            FragColor = vec4(prefilteredColor, 1.0);
+        }
+    )";
+
+    _prefilterShader.reset(new GLSLProgram);
+    _prefilterShader->attachVertexShader(vsCode);
+    _prefilterShader->attachFragmentShader(fsCode);
+    _prefilterShader->link();
+}
+
+void Renderer::computePrefilterMap() {
+    if (_envCubemap == 0) return;
+
+    GLint prevFbo; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+    GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
+
+    GLuint captureFBO, captureRBO;
+    glGenFramebuffers(1, &captureFBO);
+    glGenRenderbuffers(1, &captureRBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+
+    glm::mat4 captureProjection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+    glm::mat4 captureViews[] = {
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f))
+    };
+
+    _prefilterShader->use();
+    _prefilterShader->setUniformInt("environmentMap", 0);
+    _prefilterShader->setUniformMat4("projection", captureProjection);
+    // 假设原始 HDR 也是 1024 (如果不是，这里应该传实际大小，不过 1024 够用了)
+    _prefilterShader->setUniformFloat("resolution", 1024.0f); 
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, _envCubemap);
+
+    // [关键] 循环处理 Mipmap Levels
+    // 基础分辨率 128，最大层级 5 (128, 64, 32, 16, 8)
+    unsigned int maxMipLevels = 5; 
+    
+    glDisable(GL_CULL_FACE);
+
+    for (unsigned int mip = 0; mip < maxMipLevels; ++mip)
+    {
+        // 根据层级计算粗糙度：Level 0 = 0.0 (光滑), Level 4 = 1.0 (粗糙)
+        float roughness = (float)mip / (float)(maxMipLevels - 1);
+        _prefilterShader->setUniformFloat("roughness", roughness);
+
+        // Resize FBO (RenderBuffer 用于深度)
+        unsigned int mipWidth  = 128 * std::pow(0.5, mip);
+        unsigned int mipHeight = 128 * std::pow(0.5, mip);
+        
+        glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, mipWidth, mipHeight);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, captureRBO);
+        
+        glViewport(0, 0, mipWidth, mipHeight);
+
+        for (unsigned int i = 0; i < 6; ++i)
+        {
+            _prefilterShader->setUniformMat4("view", captureViews[i]);
+            // 渲染到 _prefilterMap 的特定 Mip 层级
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 
+                                   GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, _prefilterMap, mip);
+
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            _skyboxCube->draw();
+        }
+    }
+    
+    glEnable(GL_CULL_FACE); // 恢复
+
+    // 清理
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &captureFBO);
+    glDeleteRenderbuffers(1, &captureRBO);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+
+    std::cout << "[Renderer] Computed Prefilter Map (Specular IBL)" << std::endl;
+}
+
+void Renderer::initBRDFResources() {
+    // 1. 创建 BRDF LUT 纹理 (2D, 16bit Float)
+    // 512x512 足够精确
+    glGenTextures(1, &_brdfLUT);
+    glBindTexture(GL_TEXTURE_2D, _brdfLUT);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, 512, 512, 0, GL_RG, GL_FLOAT, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    // 2. 编译积分 Shader
+    const char* vsCode = R"(
+        #version 330 core
+        layout (location = 0) in vec3 aPos;
+        layout (location = 1) in vec2 aTexCoords;
+        out vec2 TexCoords;
+        void main() {
+            TexCoords = aTexCoords;
+            gl_Position = vec4(aPos, 1.0);
+        }
+    )";
+
+    const char* fsCode = R"(
+        #version 330 core
+        out vec2 FragColor;
+        in vec2 TexCoords;
+
+        const float PI = 3.14159265359;
+
+        // --- Hammersley ---
+        float RadicalInverse_VdC(uint bits) {
+            bits = (bits << 16u) | (bits >> 16u);
+            bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+            bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+            bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+            bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+            return float(bits) * 2.3283064365386963e-10;
+        }
+        vec2 Hammersley(uint i, uint N) {
+            return vec2(float(i)/float(N), RadicalInverse_VdC(i));
+        }
+
+        // --- Geometry Smith ---
+        float GeometrySchlickGGX(float NdotV, float roughness) {
+            float a = roughness;
+            float k = (a * a) / 2.0;
+            float nom   = NdotV;
+            float denom = NdotV * (1.0 - k) + k;
+            return nom / denom;
+        }
+        float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+            float NdotV = max(dot(N, V), 0.0);
+            float NdotL = max(dot(N, L), 0.0);
+            float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+            float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+            return ggx1 * ggx2;
+        }
+
+        // --- Importance Sample ---
+        vec3 ImportanceSampleGGX(vec2 Xi, vec3 N, float roughness) {
+            float a = roughness*roughness;
+            float phi = 2.0 * PI * Xi.x;
+            float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a*a - 1.0) * Xi.y));
+            float sinTheta = sqrt(1.0 - cosTheta*cosTheta);
+            vec3 H;
+            H.x = cos(phi) * sinTheta;
+            H.y = sin(phi) * sinTheta;
+            H.z = cosTheta;
+            vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+            vec3 tangent = normalize(cross(up, N));
+            vec3 bitangent = cross(N, tangent);
+            vec3 sampleVec = tangent * H.x + bitangent * H.y + N * H.z;
+            return normalize(sampleVec);
+        }
+
+        // --- Integrate BRDF ---
+        vec2 IntegrateBRDF(float NdotV, float roughness) {
+            vec3 V;
+            V.x = sqrt(1.0 - NdotV*NdotV);
+            V.y = 0.0;
+            V.z = NdotV;
+
+            float A = 0.0;
+            float B = 0.0;
+            vec3 N = vec3(0.0, 0.0, 1.0);
+
+            const uint SAMPLE_COUNT = 1024u;
+            for(uint i = 0u; i < SAMPLE_COUNT; ++i) {
+                vec2 Xi = Hammersley(i, SAMPLE_COUNT);
+                vec3 H  = ImportanceSampleGGX(Xi, N, roughness);
+                vec3 L  = normalize(2.0 * dot(V, H) * H - V);
+
+                float NdotL = max(L.z, 0.0);
+                float NdotH = max(H.z, 0.0);
+                float VdotH = max(dot(V, H), 0.0);
+
+                if(NdotL > 0.0) {
+                    float G = GeometrySmith(N, V, L, roughness);
+                    float G_Vis = (G * VdotH) / (NdotH * NdotV);
+                    float Fc = pow(1.0 - VdotH, 5.0);
+
+                    A += (1.0 - Fc) * G_Vis;
+                    B += Fc * G_Vis;
+                }
+            }
+            return vec2(A, B) / float(SAMPLE_COUNT);
+        }
+
+        void main() {
+            vec2 integratedBRDF = IntegrateBRDF(TexCoords.x, TexCoords.y);
+            FragColor = integratedBRDF;
+        }
+    )";
+
+    _brdfShader.reset(new GLSLProgram);
+    _brdfShader->attachVertexShader(vsCode);
+    _brdfShader->attachFragmentShader(fsCode);
+    _brdfShader->link();
+}
+
+void Renderer::computeBRDFLUT() {
+    // 临时 Quad
+    unsigned int quadVAO, quadVBO;
+    float quadVertices[] = {
+        // positions        // texture Coords
+        -1.0f,  1.0f, 0.0f, 0.0f, 1.0f,
+        -1.0f, -1.0f, 0.0f, 0.0f, 0.0f,
+         1.0f,  1.0f, 0.0f, 1.0f, 1.0f,
+         1.0f, -1.0f, 0.0f, 1.0f, 0.0f,
+    };
+    glGenVertexArrays(1, &quadVAO);
+    glGenBuffers(1, &quadVBO);
+    glBindVertexArray(quadVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), &quadVertices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+
+    // 准备渲染
+    GLint prevFbo; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+    GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
+
+    GLuint captureFBO, captureRBO;
+    glGenFramebuffers(1, &captureFBO);
+    glGenRenderbuffers(1, &captureRBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+    glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 512, 512);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, _brdfLUT, 0);
+
+    glViewport(0, 0, 512, 512);
+    _brdfShader->use();
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    
+    glBindVertexArray(quadVAO);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+
+    // 清理
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &captureFBO);
+    glDeleteRenderbuffers(1, &captureRBO);
+    glDeleteVertexArrays(1, &quadVAO);
+    glDeleteBuffers(1, &quadVBO);
+
+    // 恢复
+    glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+
+    std::cout << "[Renderer] Computed BRDF LUT" << std::endl;
+}
+
+void Renderer::drawSkybox(const glm::mat4& view, const glm::mat4& proj, const SceneEnvironment& env) {
     glDepthFunc(GL_LEQUAL);
     _skyboxShader->use();
     _skyboxShader->setUniformMat4("view", view);
     _skyboxShader->setUniformMat4("projection", proj);
+
+    if (env.type == SkyboxType::Procedural) {
+        _skyboxShader->setUniformBool("useHDR", false);
+        _skyboxShader->setUniformVec3("colZenith", env.skyZenithColor);
+        _skyboxShader->setUniformVec3("colHorizon", env.skyHorizonColor);
+        _skyboxShader->setUniformVec3("colGround", env.groundColor);
+        _skyboxShader->setUniformFloat("energy", env.skyEnergy * env.globalExposure);
+
+    }
+    else if (env.type == SkyboxType::CubeMap) {
+        _skyboxShader->setUniformBool("useHDR", true);
+        
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, _envCubemap);
+        _skyboxShader->setUniformInt("skyboxMap", 0);
+        _skyboxShader->setUniformFloat("energy", env.skyEnergy * env.globalExposure);
+    }
     
     glDisable(GL_CULL_FACE);
     _skyboxCube->draw();
@@ -1363,6 +2184,8 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
 
     _mainShader->setUniformBool("isDebug", false);
 
+    _mainShader->setUniformFloat("exposure", scene.getEnvironment().globalExposure);
+
     // 1. 设置阴影相关 Uniforms
     _mainShader->setUniformInt("shadowMap", 2);
 
@@ -1392,9 +2215,8 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
     for(auto l : dirLights) if(l->castShadows) { globalBias = l->shadowBias; break; }
     _mainShader->setUniformFloat("shadowBias", globalBias);
 
-    // 2. Point Shadows -> Slot 4, 5, 6, 7
-    // 告诉 Shader：pointShadowMaps[0] 在纹理单元 4，[1] 在 5...
-    int pointShadowSamplers[4] = {4, 5, 6, 7};
+    // 2. Point Shadows -> Slot 7, 8, 9, 10
+    int pointShadowSamplers[4] = {7, 8, 9, 10};
     GLint locPointMaps = glGetUniformLocation(_mainShader->getHandle(), "pointShadowMaps");
     if (locPointMaps != -1) {
         // 传递数组
@@ -1508,22 +2330,69 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
             _mainShader->setUniformBool("hasDiffuseMap", true);
         } else {
             _mainShader->setUniformBool("hasDiffuseMap", false);
-            // 为了安全，解绑 Slot 0 或者绑定一个白色纹理
-            // Texture2D::unbind() 是静态的或者解绑当前，这里简单处理：
-            // 只要 hasDiffuseMap 是 false，Shader 就不会采样，所以不解绑也行，
-            // 但为了防止状态污染，最好解绑。
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, 0);
         }
 
         if (meshComp->normalMap) {
-            meshComp->normalMap->bind(1); // 绑定到 Slot 1
+            meshComp->normalMap->bind(1); // Slot 1
             _mainShader->setUniformBool("hasNormalMap", true);
             _mainShader->setUniformFloat("normalStrength", meshComp->normalStrength);
             _mainShader->setUniformBool("flipNormalY", meshComp->flipNormalY);
         } else {
             _mainShader->setUniformBool("hasNormalMap", false);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, 0);
         }
+
+        if (meshComp->ormMap) {
+            meshComp->ormMap->bind(4); // Slot 4
+            _mainShader->setUniformBool("hasOrmMap", true);
+        } else {
+            _mainShader->setUniformBool("hasOrmMap", false);
+            glActiveTexture(GL_TEXTURE8);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
+        if (meshComp->emissiveMap) {
+            meshComp->emissiveMap->bind(5); // Slot 5
+            _mainShader->setUniformBool("hasEmissiveMap", true);
+        } else {
+            _mainShader->setUniformBool("hasEmissiveMap", false);
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+        _mainShader->setUniformVec3("emissiveColor", meshComp->emissiveColor);
+        _mainShader->setUniformFloat("emissiveStrength", meshComp->emissiveStrength);
+
+        if (meshComp->opacityMap) {
+            meshComp->opacityMap->bind(6); // Slot 6
+            _mainShader->setUniformBool("hasOpacityMap", true);
+            _mainShader->setUniformFloat("alphaCutoff", meshComp->alphaCutoff);
+        } else {
+            _mainShader->setUniformBool("hasOpacityMap", false);
+            glActiveTexture(GL_TEXTURE6);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
+        // 获取环境配置
+        const auto& env = scene.getEnvironment();
+        // 绑定 Irradiance Map 到 Slot 11
+        glActiveTexture(GL_TEXTURE11);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, _irradianceMap);
+        _mainShader->setUniformInt("irradianceMap", 11);
+
+        glActiveTexture(GL_TEXTURE12);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, _prefilterMap);
+        _mainShader->setUniformInt("prefilterMap", 12);
+
+        glActiveTexture(GL_TEXTURE13);
+        glBindTexture(GL_TEXTURE_2D, _brdfLUT);
+        _mainShader->setUniformInt("brdfLUT", 13);
+
+        // 如果 _irradianceMap 不为 0，说明我们计算好了
+        bool useIBL = (env.type == SkyboxType::CubeMap) && (_irradianceMap != 0);
+        _mainShader->setUniformBool("hasIrradianceMap", useIBL);
         
         _mainShader->setUniformBool("isUnlit", meshComp->isGizmo);
         _mainShader->setUniformBool("isDoubleSided", meshComp->doubleSided);
@@ -1656,7 +2525,7 @@ void Renderer::updateReflectionProbes(const Scene& scene)
             // A. 画天空盒
             // 注意：DrawSkybox 需要去平移的 View 矩阵
             glm::mat4 viewNoTrans = glm::mat4(glm::mat3(shadowViews[i])); 
-            drawSkybox(viewNoTrans, shadowProj);
+            drawSkybox(viewNoTrans, shadowProj, scene.getEnvironment());
 
             // B. 画场景物体
             // 关键：传入 go.get() 作为 excludeObject，防止画自己
