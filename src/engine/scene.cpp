@@ -164,7 +164,7 @@ void Scene::exportToOBJ(const std::string& filename)
     std::cout << "Scene exported successfully to " << filename << std::endl;
 }
 
-void Scene::importSceneFromOBJ(const std::string& filepath)
+void Scene::importScene(const std::string& filepath)
 {
     // 1. 向资源管理器请求场景资源
     // 此时 ResourceManager 会负责：

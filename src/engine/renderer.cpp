@@ -29,7 +29,7 @@ void Renderer::init() {
         layout(location = 0) in vec3 aPosition;
         layout(location = 1) in vec3 aNormal;
         layout(location = 2) in vec2 aTexCoord;
-        layout(location = 3) in vec3 aTangent;
+        layout(location = 3) in vec4 aTangent;
 
         out vec3 FragPos;
         out vec3 Normal;
@@ -57,7 +57,7 @@ void Renderer::init() {
             Normal = N; // 将计算好的法线传给 FS (虽然 FS 可能有了 TBN 会重算，但保留它是个好习惯)
             
             // 3. 计算世界空间切线 (T)
-            vec3 T = normalize(normalMatrix * aTangent);
+            vec3 T = normalize(normalMatrix * aTangent.xyz);
             
             // 4. Gram-Schmidt 正交化
             // 这一步非常关键！它剔除 T 中包含的 N 分量，确保 T 绝对垂直于 N。
@@ -66,7 +66,7 @@ void Renderer::init() {
             
             // 5. 计算副切线 (Bitangent, B)
             // 利用叉乘生成第三个轴
-            vec3 B = cross(N, T);
+            vec3 B = cross(N, T) * aTangent.w;
             
             // 6. 构建 TBN 矩阵
             TBN = mat3(T, B, N);
@@ -136,8 +136,6 @@ void Renderer::init() {
         uniform float alphaCutoff;
 
         // 动态环境贴图 IBL
-        uniform samplerCube envMap;
-        uniform bool hasEnvMap;
         uniform samplerCube irradianceMap; 
         uniform bool hasIrradianceMap;
         uniform samplerCube prefilterMap; 
@@ -480,69 +478,38 @@ void Renderer::init() {
                 CalcSpotLight(spotLights[i], norm, FragPos, viewDir, albedoColor, F0, roughness, directDiffuse, directSpecular);
             
             // 2. 环境光 (IBL)
-            vec3 ambientDiffuse = vec3(0.0);
-            vec3 ambientSpecular = vec3(0.0);
+            vec3 ambientLighting = vec3(0.0);
             
-            // [Diffuse IBL]
             if (hasIrradianceMap) {
-                // A. 采样辐照度贴图
+                // --- Diffuse IBL ---
                 vec3 irradiance = texture(irradianceMap, norm).rgb;
-                
-                // B. 计算菲涅尔 (Fresnel) - 用于计算漫反射比例
-                vec3 kS = FresnelSchlickRoughness(max(dot(norm, viewDir), 0.0), F0, roughness);
-                vec3 kD = 1.0 - kS;
-                kD *= 1.0 - metallic; // 金属吸收所有折射光
-
-                // C. 漫反射结果 = kD * 辐照度 * 颜色
-                ambientDiffuse = kD * irradiance * albedoColor;
-            } 
-            // 如果没有计算好的 IBL，回退到旧的反射探针逻辑或简单环境光
-            else if (hasEnvMap) {
-                // (旧逻辑) 简单的 Diffuse IBL 近似
-                vec3 irradiance = textureLod(envMap, norm, 8.0).rgb; 
                 vec3 kS = FresnelSchlickRoughness(max(dot(norm, viewDir), 0.0), F0, roughness);
                 vec3 kD = 1.0 - kS;
                 kD *= 1.0 - metallic;
-                ambientDiffuse = kD * irradiance * albedoColor;
-            } else {
-                // 最基础的 fallback
-                ambientDiffuse = vec3(0.1) * albedoColor;
-            }
+                vec3 ambientDiffuse = kD * irradiance * albedoColor;
 
-            // [Specular IBL]
-            if (hasIrradianceMap) {
-                // 1. 采样 Prefilter Map (根据粗糙度决定 Mip Level)
+                // --- Specular IBL ---
+                // 1. Prefilter
                 vec3 R = reflect(-viewDir, norm);
                 const float MAX_REFLECTION_LOD = 4.0;
                 vec3 prefilteredColor = textureLod(prefilterMap, R, roughness * MAX_REFLECTION_LOD).rgb;
                 
-                // 2. 查表 BRDF LUT (根据 NdotV 和 Roughness)
+                // 2. BRDF LUT
                 vec2 brdf  = texture(brdfLUT, vec2(max(dot(norm, viewDir), 0.0), roughness)).rg;
                 
-                // 3. 组合 (Split Sum Approximation)
-                // specular = prefilteredColor * (F * brdf.x + brdf.y)
-                vec3 specular = prefilteredColor * (F0 * brdf.x + brdf.y);
+                // 3. Combine
+                vec3 ambientSpecular = prefilteredColor * (F0 * brdf.x + brdf.y);
 
-                ambientSpecular = specular;
-            }
-            else if (hasEnvMap) {
-                vec3 R = reflect(-viewDir, norm);
-                vec3 correctedR = BoxProjectedCubemapDirection(FragPos, R, probePos, probeBoxMin, probeBoxMax);
-                float MAX_LOD = 4.0;
-                vec3 prefilteredColor = textureLod(envMap, correctedR, roughness * MAX_LOD).rgb;
-                vec3 specularFactor = EnvBRDFApprox(F0, roughness, max(dot(norm, viewDir), 0.0));
-                ambientSpecular = prefilteredColor * specularFactor * iblIntensity;
-            } else {
-                // 如果没有环境图，给一点极弱的底色防止全黑
-                ambientSpecular = vec3(0.0);
+                ambientLighting = (ambientDiffuse + ambientSpecular) * iblIntensity;
+            } 
+            else {
+                // 极端情况下的 Fallback (例如资源未加载)
+                // 给一点点微弱的底色，防止全黑
+                ambientLighting = vec3(0.03) * albedoColor * ao;
             }
 
-            // 应用 IBL 强度
-            ambientDiffuse *= iblIntensity;
-            ambientSpecular *= iblIntensity;
-            
-            // 3. 组合 PBR 不透明部分
-            vec3 opaqueColor = (ambientDiffuse + directDiffuse) * ao + (ambientSpecular + directSpecular);
+            // 3. 组合最终颜色
+            vec3 opaqueColor = (ambientLighting + directDiffuse) * ao + directSpecular;
             
             // 4. 玻璃/折射逻辑
             vec3 finalColor = opaqueColor;
@@ -565,36 +532,18 @@ void Renderer::init() {
                 vec3 refractColor = vec3(0.0);
                 vec3 reflectColor = vec3(0.0);
 
-                // 优先使用 IBL 贴图进行折射/反射
-                if (hasIrradianceMap) {
-                     float k = max(material.refractionIndex, 1.0);
-                     float ratio = 1.0 / k;
-                     vec3 I = normalize(FragPos - viewPos);
-                     
-                     // 折射
-                     vec3 R_refract = refract(I, norm, ratio);
-                     refractColor = textureLod(prefilterMap, R_refract, 0.0).rgb * iblIntensity;
+                // 使用 IBL 贴图进行折射/反射
+                float k = max(material.refractionIndex, 1.0);
+                float ratio = 1.0 / k;
+                vec3 I = normalize(FragPos - viewPos);
+                
+                // 折射
+                vec3 R_refract = refract(I, norm, ratio);
+                refractColor = textureLod(prefilterMap, R_refract, 0.0).rgb * iblIntensity;
 
-                     // 反射
-                     vec3 R_reflect = reflect(I, norm);
-                     reflectColor = textureLod(prefilterMap, R_reflect, material.roughness * 4.0).rgb * iblIntensity;
-                }
-                else if (hasEnvMap) {
-                    // Refract
-                    float k = max(material.refractionIndex, 1.0);
-                    float ratio = 1.0 / k;
-                    vec3 I = normalize(FragPos - viewPos);
-                    
-                    // 简化折射采样 (不做色散了，为了性能和清晰度)
-                    vec3 R_refract = refract(I, norm, ratio);
-                    vec3 corrR_refract = BoxProjectedCubemapDirection(FragPos, R_refract, probePos, probeBoxMin, probeBoxMax);
-                    refractColor = textureLod(envMap, corrR_refract, 0.0).rgb * iblIntensity;
-
-                    // Reflect
-                    vec3 R_reflect = reflect(I, norm);
-                    vec3 corrR_reflect = BoxProjectedCubemapDirection(FragPos, R_reflect, probePos, probeBoxMin, probeBoxMax);
-                    reflectColor = textureLod(envMap, corrR_reflect, material.roughness * 4.0).rgb * iblIntensity;
-                }
+                // 反射
+                vec3 R_reflect = reflect(I, norm);
+                reflectColor = textureLod(prefilterMap, R_reflect, material.roughness * 4.0).rgb * iblIntensity;
 
                 vec3 glassBody = mix(refractColor, reflectColor, F);
                 
@@ -1118,7 +1067,6 @@ void Renderer::init() {
     _mainShader->setUniformInt("diffuseMap", 0);  // Slot 0: Albedo
     _mainShader->setUniformInt("normalMap", 1);   // Slot 1: Normal
     _mainShader->setUniformInt("shadowMap", 2);   // Slot 2: CSM Array
-    _mainShader->setUniformInt("envMap", 3);      // Slot 3: IBL Cubemap (改到3，避开NormalMap)
     _mainShader->setUniformInt("ormMap", 4);      // Slot 4: ORM
     _mainShader->setUniformInt("emissiveMap", 5); // Slot 5: Emissive
     _mainShader->setUniformInt("opacityMap", 6);  // Slot 6: Opacity
@@ -1253,7 +1201,7 @@ void Renderer::init() {
             if (useHDR) {
                 // 直接采样 HDR 天空盒
                 finalColor = texture(skyboxMap, TexCoords).rgb;
-            } 
+            }
             else {
                 // 程序化天空逻辑
                 vec3 dir = normalize(TexCoords);
@@ -1307,6 +1255,10 @@ void Renderer::init() {
     // BRDF LUT 只需要计算一次，因为它跟环境贴图无关，只跟数学公式有关
     // 所以我们在 init 里直接计算它
     computeBRDFLUT();
+
+    // 初始化时，根据默认的程序化参数烘焙一次，防止开局全黑
+    SceneEnvironment defaultEnv; // 使用默认参数
+    updateProceduralSkybox(defaultEnv);
 }
 
 void Renderer::onResize(int width, int height) {
@@ -1316,6 +1268,11 @@ void Renderer::onResize(int width, int height) {
 }
 
 void Renderer::loadSkyboxHDR(const std::string& path) {
+    IBLProfile& target = _resHDR;
+    
+    // 如果显存未分配，直接返回
+    if (target.envMap == 0) return;
+
     // 1. 加载原始数据 (保持不变)
     HDRData hdrData = ResourceManager::Get().loadHDRRaw(path);
     if (!hdrData.isValid()) return;
@@ -1376,11 +1333,14 @@ void Renderer::loadSkyboxHDR(const std::string& path) {
     for (unsigned int i = 0; i < 6; ++i)
     {
         _equirectangularToCubemapShader->setUniformMat4("view", captureViews[i]);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, _envCubemap, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, target.envMap, 0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         _skyboxCube->draw(); 
     }
+
+    glBindTexture(GL_TEXTURE_CUBE_MAP, target.envMap);
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
 
     // [恢复] 恢复面剔除状态
     if (isCullEnabled) glEnable(GL_CULL_FACE);
@@ -1396,9 +1356,10 @@ void Renderer::loadSkyboxHDR(const std::string& path) {
     std::cout << "[Renderer] Converted HDR to Cubemap: " << path << std::endl;
 
     // 立即计算漫反射积分
-    computeIrradianceMap();
+    computeIrradianceMap(target);
+    computePrefilterMap(target);
 
-    computePrefilterMap();
+    target.isBaked = true;
 }
 
 void Renderer::render(const Scene& scene, Camera* camera, 
@@ -1533,6 +1494,45 @@ void Renderer::render(const Scene& scene, Camera* camera,
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+void Renderer::allocateIBLTextures(IBLProfile& profile) {
+    // Environment Map (1024x1024)
+    glGenTextures(1, &profile.envMap);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, profile.envMap);
+    for (unsigned int i = 0; i < 6; ++i) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 1024, 1024, 0, GL_RGB, GL_FLOAT, nullptr);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); // 记得开 Mipmap
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+    // Irradiance Map (32x32)
+    glGenTextures(1, &profile.irradianceMap);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, profile.irradianceMap);
+    for (unsigned int i = 0; i < 6; ++i) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 32, 32, 0, GL_RGB, GL_FLOAT, nullptr);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+    // Prefilter Map (512x512)
+    glGenTextures(1, &profile.prefilterMap);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, profile.prefilterMap);
+    for (unsigned int i = 0; i < 6; ++i) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 512, 512, 0, GL_RGB, GL_FLOAT, nullptr);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP); // 分配内存
+}
+
 void Renderer::initSkyboxResources() {
     // 1. 编译转换 Shader
     const char* vsCode = R"(
@@ -1574,36 +1574,14 @@ void Renderer::initSkyboxResources() {
     _equirectangularToCubemapShader->attachFragmentShader(fsCode);
     _equirectangularToCubemapShader->link();
 
-    // 2. 创建最终的 Environment Cubemap
-    // 我们预先分配好 ID，以后每次加载 HDR 只是更新内容，不删 ID
-    glGenTextures(1, &_envCubemap);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, _envCubemap);
-    for (unsigned int i = 0; i < 6; ++i) {
-        // 使用 16F 浮点格式存储 HDR 数据
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 
-                     1024, 1024, 0, GL_RGB, GL_FLOAT, nullptr);
-    }
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    // 开启线性过滤，否则天空会有像素感
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR); 
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    // 为程序化天空分配一套资源
+    allocateIBLTextures(_resProcedural);
+    
+    // 为 HDR 天空分配另一套资源
+    allocateIBLTextures(_resHDR);
 }
 
 void Renderer::initIBLResources() {
-    // 1. 创建 Irradiance Map (低分辨率即可，32x32 足矣，因为它是低频信号)
-    glGenTextures(1, &_irradianceMap);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, _irradianceMap);
-    for (unsigned int i = 0; i < 6; ++i) {
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 32, 32, 0, GL_RGB, GL_FLOAT, nullptr);
-    }
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
     // 2. 编译卷积 Shader
     const char* vsCode = R"(
         #version 330 core
@@ -1663,9 +1641,9 @@ void Renderer::initIBLResources() {
     _irradianceShader->link();
 }
 
-void Renderer::computeIrradianceMap() {
+void Renderer::computeIrradianceMap(const IBLProfile& profile) {
     // 确保有源纹理
-    if (_envCubemap == 0) return;
+    if (profile.envMap == 0) return;
 
     // 保存状态
     GLint prevFbo; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
@@ -1698,7 +1676,7 @@ void Renderer::computeIrradianceMap() {
     _irradianceShader->setUniformMat4("projection", captureProjection);
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, _envCubemap); // 输入：原始 HDR Cubemap
+    glBindTexture(GL_TEXTURE_CUBE_MAP, profile.envMap); // 输入：原始 HDR Cubemap
 
     glViewport(0, 0, 32, 32);
     glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
@@ -1710,7 +1688,7 @@ void Renderer::computeIrradianceMap() {
     for (unsigned int i = 0; i < 6; ++i)
     {
         _irradianceShader->setUniformMat4("view", captureViews[i]);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, _irradianceMap, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, profile.irradianceMap, 0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         _skyboxCube->draw();
@@ -1731,24 +1709,6 @@ void Renderer::computeIrradianceMap() {
 }
 
 void Renderer::initPrefilterResources() {
-    // 1. 创建 Prefilter Cubemap
-    // 分辨率通常比 HDR 原图小一点，比如 128 或 512
-    glGenTextures(1, &_prefilterMap);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, _prefilterMap);
-    for (unsigned int i = 0; i < 6; ++i) {
-        // 注意：这里分配了 128x128 的基础层，后续我们会生成 Mipmap
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 128, 128, 0, GL_RGB, GL_FLOAT, nullptr);
-    }
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    // [关键] 开启三线性过滤 (Trilinear) 以便在不同粗糙度之间插值
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); 
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    
-    // 自动分配内存给 Mipmap 链
-    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
-
     // 2. 编译 Prefilter Shader (这是 PBR 中最复杂的预计算 Shader)
     // 它使用蒙特卡洛积分来模拟不同粗糙度下的高光波瓣
     const char* vsCode = R"(
@@ -1865,8 +1825,8 @@ void Renderer::initPrefilterResources() {
     _prefilterShader->link();
 }
 
-void Renderer::computePrefilterMap() {
-    if (_envCubemap == 0) return;
+void Renderer::computePrefilterMap(const IBLProfile& profile) {
+    if (profile.envMap == 0) return;
 
     GLint prevFbo; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
     GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
@@ -1893,10 +1853,11 @@ void Renderer::computePrefilterMap() {
     _prefilterShader->setUniformFloat("resolution", 1024.0f); 
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, _envCubemap);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, profile.envMap);
 
     // [关键] 循环处理 Mipmap Levels
     // 基础分辨率 128，最大层级 5 (128, 64, 32, 16, 8)
+    int resolution = 512;
     unsigned int maxMipLevels = 5; 
     
     glDisable(GL_CULL_FACE);
@@ -1908,8 +1869,8 @@ void Renderer::computePrefilterMap() {
         _prefilterShader->setUniformFloat("roughness", roughness);
 
         // Resize FBO (RenderBuffer 用于深度)
-        unsigned int mipWidth  = 128 * std::pow(0.5, mip);
-        unsigned int mipHeight = 128 * std::pow(0.5, mip);
+        unsigned int mipWidth  = resolution * std::pow(0.5, mip);
+        unsigned int mipHeight = resolution * std::pow(0.5, mip);
         
         glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
         glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, mipWidth, mipHeight);
@@ -1922,7 +1883,7 @@ void Renderer::computePrefilterMap() {
             _prefilterShader->setUniformMat4("view", captureViews[i]);
             // 渲染到 _prefilterMap 的特定 Mip 层级
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 
-                                   GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, _prefilterMap, mip);
+                                   GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, profile.prefilterMap, mip);
 
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             _skyboxCube->draw();
@@ -2118,27 +2079,39 @@ void Renderer::computeBRDFLUT() {
 }
 
 void Renderer::drawSkybox(const glm::mat4& view, const glm::mat4& proj, const SceneEnvironment& env) {
+    GLuint envMapToDraw = 0;
+    if (env.type == SkyboxType::Procedural) {
+        envMapToDraw = _resProcedural.envMap;
+    } else {
+        envMapToDraw = _resHDR.envMap;
+    }
+
+    if (envMapToDraw == 0) return;
+
     glDepthFunc(GL_LEQUAL);
     _skyboxShader->use();
     _skyboxShader->setUniformMat4("view", view);
     _skyboxShader->setUniformMat4("projection", proj);
 
     if (env.type == SkyboxType::Procedural) {
+        // 模式 A: 实时程序化 (使用 Uniforms)
+        // 这样背景颜色会跟随滑块实时变化，无需等待烘焙
         _skyboxShader->setUniformBool("useHDR", false);
         _skyboxShader->setUniformVec3("colZenith", env.skyZenithColor);
         _skyboxShader->setUniformVec3("colHorizon", env.skyHorizonColor);
         _skyboxShader->setUniformVec3("colGround", env.groundColor);
-        _skyboxShader->setUniformFloat("energy", env.skyEnergy * env.globalExposure);
-
-    }
-    else if (env.type == SkyboxType::CubeMap) {
+    } 
+    else {
+        // 模式 B: 纹理采样 (使用 Cubemap)
         _skyboxShader->setUniformBool("useHDR", true);
         
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_CUBE_MAP, _envCubemap);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, envMapToDraw);
         _skyboxShader->setUniformInt("skyboxMap", 0);
-        _skyboxShader->setUniformFloat("energy", env.skyEnergy * env.globalExposure);
     }
+
+    // 应用曝光
+    _skyboxShader->setUniformFloat("energy", env.skyEnergy * env.globalExposure);
     
     glDisable(GL_CULL_FACE);
     _skyboxCube->draw();
@@ -2184,7 +2157,8 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
 
     _mainShader->setUniformBool("isDebug", false);
 
-    _mainShader->setUniformFloat("exposure", scene.getEnvironment().globalExposure);
+    const auto& env = scene.getEnvironment();
+    _mainShader->setUniformFloat("exposure", env.globalExposure);
 
     // 1. 设置阴影相关 Uniforms
     _mainShader->setUniformInt("shadowMap", 2);
@@ -2307,6 +2281,39 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
 
     _mainShader->setUniformInt("diffuseMap", 0);
 
+    const IBLProfile* activeProfile = nullptr;
+    
+    if (env.type == SkyboxType::Procedural) {
+        // 程序化模式：直接使用程序化资源 (Init时已分配，Start时已烘焙)
+        activeProfile = &_resProcedural;
+    } else {
+        // HDR 模式：优先使用 HDR 资源，如果未就绪(没加载文件)，回退到程序化
+        if (_resHDR.isBaked) activeProfile = &_resHDR;
+        // else if (_resProcedural.isBaked) activeProfile = &_resProcedural;
+    }
+
+    // 绑定全局 IBL 资源
+    if (activeProfile && activeProfile->isBaked) {
+        // 绑定 Irradiance Map 到 Slot 11
+        glActiveTexture(GL_TEXTURE11);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, activeProfile->irradianceMap);
+        _mainShader->setUniformInt("irradianceMap", 11);
+
+        // 绑定 Prefilter Map 到 Slot 12 (默认)
+        glActiveTexture(GL_TEXTURE12);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, activeProfile->prefilterMap);
+        _mainShader->setUniformInt("prefilterMap", 12);
+
+        // 绑定 BRDF LUT 到 Slot 13
+        glActiveTexture(GL_TEXTURE13);
+        glBindTexture(GL_TEXTURE_2D, _brdfLUT);
+        _mainShader->setUniformInt("brdfLUT", 13);
+
+        _mainShader->setUniformBool("hasIrradianceMap", true);
+    } else {
+        _mainShader->setUniformBool("hasIrradianceMap", false);
+    }
+
     // 3. 绘制物体 Loop
     glFrontFace(GL_CCW);
     glEnable(GL_CULL_FACE);
@@ -2374,25 +2381,6 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
             glActiveTexture(GL_TEXTURE6);
             glBindTexture(GL_TEXTURE_2D, 0);
         }
-
-        // 获取环境配置
-        const auto& env = scene.getEnvironment();
-        // 绑定 Irradiance Map 到 Slot 11
-        glActiveTexture(GL_TEXTURE11);
-        glBindTexture(GL_TEXTURE_CUBE_MAP, _irradianceMap);
-        _mainShader->setUniformInt("irradianceMap", 11);
-
-        glActiveTexture(GL_TEXTURE12);
-        glBindTexture(GL_TEXTURE_CUBE_MAP, _prefilterMap);
-        _mainShader->setUniformInt("prefilterMap", 12);
-
-        glActiveTexture(GL_TEXTURE13);
-        glBindTexture(GL_TEXTURE_2D, _brdfLUT);
-        _mainShader->setUniformInt("brdfLUT", 13);
-
-        // 如果 _irradianceMap 不为 0，说明我们计算好了
-        bool useIBL = (env.type == SkyboxType::CubeMap) && (_irradianceMap != 0);
-        _mainShader->setUniformBool("hasIrradianceMap", useIBL);
         
         _mainShader->setUniformBool("isUnlit", meshComp->isGizmo);
         _mainShader->setUniformBool("isDoubleSided", meshComp->doubleSided);
@@ -2430,27 +2418,29 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
 
         auto probe = go->getComponent<ReflectionProbeComponent>();
         if (probe && probe->textureID != 0) {
-            // 如果这个物体本身就是一个反射探针，我们就使用它生成的 Environment Map
-            glActiveTexture(GL_TEXTURE3);
+            // 将探针纹理绑定到 Slot 12 (Prefilter Map 槽位)
+            // 这样 Shader 里的 specular IBL 计算就会自动使用这个探针，而不是全局天空盒
+            glActiveTexture(GL_TEXTURE12);
             glBindTexture(GL_TEXTURE_CUBE_MAP, probe->textureID);
             
-            _mainShader->setUniformBool("hasEnvMap", true);
-            
-            // 计算并传递 Box 参数
-            // 假设探针中心就是物体中心
-            glm::vec3 pPos = go->transform.position;
-            // 计算世界坐标下的 AABB
-            glm::vec3 bMin = pPos - probe->boxSize * 0.5f;
-            glm::vec3 bMax = pPos + probe->boxSize * 0.5f;
+            // // 计算并传递 Box 参数
+            // // 假设探针中心就是物体中心
+            // glm::vec3 pPos = go->transform.position;
+            // // 计算世界坐标下的 AABB
+            // glm::vec3 bMin = pPos - probe->boxSize * 0.5f;
+            // glm::vec3 bMax = pPos + probe->boxSize * 0.5f;
 
-            _mainShader->setUniformVec3("probePos", pPos);
-            _mainShader->setUniformVec3("probeBoxMin", bMin);
-            _mainShader->setUniformVec3("probeBoxMax", bMax);
+            // _mainShader->setUniformVec3("probePos", pPos);
+            // _mainShader->setUniformVec3("probeBoxMin", bMin);
+            // _mainShader->setUniformVec3("probeBoxMax", bMax);
         } else {
-            _mainShader->setUniformBool("hasEnvMap", false);
+            if (activeProfile && activeProfile->isBaked) {
+                glActiveTexture(GL_TEXTURE12);
+                glBindTexture(GL_TEXTURE_CUBE_MAP, activeProfile->prefilterMap);
+            }
         }
 
-        // [新增] IBL 强度控制
+        // IBL 强度控制
         // 建议：如果你觉得场景太亮，这里可以传 0.5 或者 0.3
         // 暂时硬编码为 0.5 试试，或者后续在 Inspector 里加个 Scene Settings
         _mainShader->setUniformFloat("iblIntensity", 0.4f);
@@ -2542,4 +2532,89 @@ void Renderer::updateReflectionProbes(const Scene& scene)
     // 恢复状态
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+}
+
+void Renderer::updateProceduralSkybox(const SceneEnvironment& env) {
+    IBLProfile& target = _resProcedural;
+    if (target.envMap == 0) return;
+
+    // 1. 保存当前状态
+    GLint prevFbo; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+    GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
+    GLboolean isCullEnabled = glIsEnabled(GL_CULL_FACE);
+
+    // 2. 准备捕获用的 FBO
+    GLuint captureFBO, captureRBO;
+    glGenFramebuffers(1, &captureFBO);
+    glGenRenderbuffers(1, &captureRBO);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+    glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
+    // 保持和 loadSkyboxHDR 一致的分辨率 (1024)
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 1024, 1024); 
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, captureRBO);
+
+    // 3. 准备相机矩阵 (90度 FOV)
+    glm::mat4 captureProjection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+    glm::mat4 captureViews[] = {
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f))
+    };
+
+    // 4. 设置 Shader 参数 (复用天空盒 Shader)
+    _skyboxShader->use();
+    _skyboxShader->setUniformMat4("projection", captureProjection);
+    _skyboxShader->setUniformBool("useHDR", false); // 关键：使用程序化分支
+    _skyboxShader->setUniformVec3("colZenith", env.skyZenithColor);
+    _skyboxShader->setUniformVec3("colHorizon", env.skyHorizonColor);
+    _skyboxShader->setUniformVec3("colGround", env.groundColor);
+    // 这里 energy 设为 1.0，因为我们在 PBR Shader 采样时会再次应用 energy/exposure
+    // 或者你可以选择在这里应用 energy，然后采样时不再乘。通常为了动态调整曝光，这里存原始颜色比较好。
+    _skyboxShader->setUniformFloat("energy", 1.0f); 
+
+    glViewport(0, 0, 1024, 1024);
+    glDisable(GL_CULL_FACE); // 在盒子内部渲染
+    glDepthFunc(GL_LEQUAL);
+
+    // 5. 渲染 6 个面
+    for (unsigned int i = 0; i < 6; ++i)
+    {
+        // 这里的 view 矩阵不需要去除平移，因为位置就是 (0,0,0)
+        _skyboxShader->setUniformMat4("view", captureViews[i]);
+        
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, target.envMap, 0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        _skyboxCube->draw();
+    }
+
+    glDepthFunc(GL_LESS);
+
+    // 必须在这里解绑 FBO，否则下面 GenerateMipmap 时，纹理既是读取源又是写入目标，会导致全黑
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // 6. 生成 Mipmap (为了让 prefilter 计算的基础层更平滑，尽管 HDR 加载时没做这步，但加上无妨)
+    glBindTexture(GL_TEXTURE_CUBE_MAP, target.envMap);
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+
+    // 7. [关键] 立即触发 IBL 重计算
+    // 这样 irradianceMap 和 prefilterMap 就会变成新的渐变色天空的卷积结果
+    computeIrradianceMap(target);
+    computePrefilterMap(target);
+
+    target.isBaked = true;
+
+    // 8. 恢复状态
+    if (isCullEnabled) glEnable(GL_CULL_FACE);
+    glDeleteFramebuffers(1, &captureFBO);
+    glDeleteRenderbuffers(1, &captureRBO);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+    
+    std::cout << "[Renderer] Procedural Skybox baked to IBL maps." << std::endl;
 }

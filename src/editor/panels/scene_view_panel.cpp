@@ -58,6 +58,8 @@ void SceneViewPanel::resizeFBO(int width, int height)
 // [修改后的签名]
 void SceneViewPanel::onImGuiRender(Scene* scene, Renderer* renderer, GameObject*& selectedObject, float contentScale)
 {
+    if (!_isOpen) return;
+
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f)); 
     if (!ImGui::Begin(_title.c_str(), &_isOpen)) {
         ImGui::End(); ImGui::PopStyleVar(); return;
@@ -115,33 +117,37 @@ void SceneViewPanel::onInputUpdate(float dt, Scene* scene, GameObject*& selected
 
     _isControlling = _cameraController->isControlling();
 
-    // 快捷键 (F 聚焦)
-    // 这里需要 GLFW 窗口句柄来检测按键吗？ ImGui 提供了 IsKeyPressed
-    if (ImGui::IsKeyPressed(ImGuiKey_F)) {
-        _cameraController->frameObject(selectedObject);
-    }
-    
-    // Key 1: Front View (+Z)
-    if (ImGui::IsKeyPressed(ImGuiKey_1) || ImGui::IsKeyPressed(ImGuiKey_Keypad1)) {
-        _cameraController->switchToView(glm::vec3(0, 0, 1));
-    }
-    // Key 3: Right View (+X)
-    if (ImGui::IsKeyPressed(ImGuiKey_3) || ImGui::IsKeyPressed(ImGuiKey_Keypad3)) {
-        _cameraController->switchToView(glm::vec3(1, 0, 0));
-    }
-    // Key 7: Top View (+Y)
-    if (ImGui::IsKeyPressed(ImGuiKey_7) || ImGui::IsKeyPressed(ImGuiKey_Keypad7)) {
-        _cameraController->switchToView(glm::vec3(0, 1, 0));
+    bool isHotKeyActive = _isHovered || _isFocused;
+
+    if (isHotKeyActive) {
+        // 快捷键 (F 聚焦)
+        // 这里需要 GLFW 窗口句柄来检测按键吗？ ImGui 提供了 IsKeyPressed
+        if (ImGui::IsKeyPressed(ImGuiKey_F)) {
+            _cameraController->frameObject(selectedObject);
+        }
+        
+        // Key 1: Front View (+Z)
+        if (ImGui::IsKeyPressed(ImGuiKey_1) || ImGui::IsKeyPressed(ImGuiKey_Keypad1)) {
+            _cameraController->switchToView(glm::vec3(0, 0, 1));
+        }
+        // Key 3: Right View (+X)
+        if (ImGui::IsKeyPressed(ImGuiKey_3) || ImGui::IsKeyPressed(ImGuiKey_Keypad3)) {
+            _cameraController->switchToView(glm::vec3(1, 0, 0));
+        }
+        // Key 7: Top View (+Y)
+        if (ImGui::IsKeyPressed(ImGuiKey_7) || ImGui::IsKeyPressed(ImGuiKey_Keypad7)) {
+            _cameraController->switchToView(glm::vec3(0, 1, 0));
+        }
+
+        // Delete
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete) && selectedObject)
+        {
+            if (scene) scene->markForDestruction(selectedObject);
+            selectedObject = nullptr; 
+        }
     }
 
-    // Delete
-    if (ImGui::IsKeyPressed(ImGuiKey_Delete) && selectedObject)
-    {
-        if (scene) scene->markForDestruction(selectedObject);
-        selectedObject = nullptr; 
-    }
-
-    if (_isHovered || _isFocused || _isControlling) {
+    if (_isHovered || _isControlling) {
         _cameraController->handleInput(); 
     }
     _cameraController->update(dt);

@@ -146,7 +146,7 @@ void Model::initGLResources()
     glEnableVertexAttribArray(2);
     // location 3: tangent
     glVertexAttribPointer(
-        3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, tangent));
+        3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, tangent));
     glEnableVertexAttribArray(3);
 
     glBindVertexArray(0);

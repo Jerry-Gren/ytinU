@@ -356,7 +356,7 @@ void GeometryFactory::computeTangents(std::vector<Vertex>& vertices, const std::
 {
     // 1. 初始化所有切线为 0
     for (auto& v : vertices) {
-        v.tangent = glm::vec3(0.0f);
+        v.tangent = glm::vec4(0.0f);
     }
 
     // 2. 遍历所有三角形，累加切线
@@ -380,17 +380,21 @@ void GeometryFactory::computeTangents(std::vector<Vertex>& vertices, const std::
         tangent.z = f * (deltaUV2.y * edge1.z - deltaUV1.y * edge2.z);
 
         // 累加到三个顶点上 (平滑切线)
-        v0.tangent += tangent;
-        v1.tangent += tangent;
-        v2.tangent += tangent;
+        v0.tangent += glm::vec4(tangent, 0.0f);
+        v1.tangent += glm::vec4(tangent, 0.0f);
+        v2.tangent += glm::vec4(tangent, 0.0f);
     }
 
-    // 3. 正交化 (Gram-Schmidt) 并归一化
+    // 3. 正交化并设置 w
     for (auto& v : vertices)
     {
-        // 重新正交化，确保切线垂直于法线
-        v.tangent = glm::normalize(v.tangent - v.normal * glm::dot(v.normal, v.tangent));
+        glm::vec3 t = glm::vec3(v.tangent);
+        glm::vec3 n = v.normal;
         
-        // (可选) 这里可以计算 Bitangent 的手性并存储到 w 分量，但目前我们先只算 Tangent
+        // Gram-Schmidt 正交化
+        t = glm::normalize(t - n * glm::dot(n, t));
+        
+        // 对于工厂生成的标准几何体，没有镜像 UV，手性 w 设为 1.0
+        v.tangent = glm::vec4(t, 1.0f);
     }
 }

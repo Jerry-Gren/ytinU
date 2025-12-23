@@ -23,9 +23,9 @@ void InspectorPanel::onImGuiRender(GameObject*& selectedObject, Scene* sceneCont
 
         ImGuiStyle& style = ImGui::GetStyle();
         float availableWidth = ImGui::GetContentRegionAvail().x;
-        const char* btnLabel = "Delete Object"; 
-        float buttonWidth = ImGui::CalcTextSize(btnLabel).x + style.FramePadding.x * 2.0f;
-        float inputWidth = availableWidth - buttonWidth - style.ItemSpacing.x;
+        const char* btnLabel = "Delete"; // 缩短文本，或者用图标
+        float btnWidth = 100.0f; // 足够放下 "Del"
+        float inputWidth = availableWidth - btnWidth - style.ItemSpacing.x;
 
         ImGui::SetNextItemWidth(inputWidth);
         if (ImGui::InputText("##Name", nameBuf, sizeof(nameBuf)))
@@ -33,7 +33,7 @@ void InspectorPanel::onImGuiRender(GameObject*& selectedObject, Scene* sceneCont
 
         ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1));
-        bool shouldDeleteObj = ImGui::Button(btnLabel);
+        bool shouldDeleteObj = ImGui::Button(btnLabel, ImVec2(btnWidth, 0));
         ImGui::PopStyleColor();
 
         if (shouldDeleteObj && sceneContext)

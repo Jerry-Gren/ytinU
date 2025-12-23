@@ -13,6 +13,14 @@
 #include "shadow_map_pass.h"
 #include "point_shadow_pass.h"
 
+struct IBLProfile {
+    GLuint envMap = 0;       // 天空盒
+    GLuint irradianceMap = 0; // 漫反射积分
+    GLuint prefilterMap = 0;  // 镜面反射预滤波
+    
+    bool isBaked = false;     // 标记是否已经烘焙过数据
+};
+
 class Renderer
 {
 public:
@@ -27,6 +35,9 @@ public:
 
     // 加载 HDR 天空盒
     void loadSkyboxHDR(const std::string& path);
+
+    // 将程序自动默认的天空盒画到_envCubemap上
+    void updateProceduralSkybox(const SceneEnvironment& env);
 
     // 核心渲染函数
     // targetFBO: 传入 0 渲染到屏幕，传入 FBO ID 渲染到纹理
@@ -56,12 +67,11 @@ private:
     // --- Render Pass ---
     std::unique_ptr<OutlinePass> _outlinePass;
 
-    // 存储天空盒 Cubemap ID
-    GLuint _envCubemap = 0;
-    // 存储漫反射环境光
-    GLuint _irradianceMap = 0;
-
-    GLuint _prefilterMap = 0;
+    IBLProfile _resProcedural; // 程序化专用
+    IBLProfile _resHDR;        // HDR 专用
+    void allocateIBLTextures(IBLProfile& profile);
+    void computeIrradianceMap(const IBLProfile& profile);
+    void computePrefilterMap(const IBLProfile& profile);
 
     GLuint _brdfLUT = 0; // BRDF 查找表
 

@@ -1,6 +1,7 @@
 #pragma once
 #include "panel.h"
 #include "engine/scene.h"
+#include "engine/renderer.h"
 
 class EnvironmentPanel : public Panel {
 public:
@@ -16,6 +17,7 @@ public:
             const char* typeNames[] = { "Procedural Sky", "HDR Map" };
             int currentType = (int)env.type;
             if (ImGui::Combo("Type", &currentType, typeNames, 2)) {
+                SkyboxType oldType = env.type;
                 env.type = (SkyboxType)currentType;
             }
 
@@ -23,10 +25,31 @@ public:
 
             if (env.type == SkyboxType::Procedural) {
                 ImGui::Text("Procedural Colors");
-                ImGui::ColorEdit3("Zenith", &env.skyZenithColor.x);
-                ImGui::ColorEdit3("Horizon", &env.skyHorizonColor.x);
-                ImGui::ColorEdit3("Ground", &env.groundColor.x);
+
+                // 定义一个辅助 lambda，用于绘制控件并检测状态
+                // 返回 true 表示用户刚刚完成了编辑（松开鼠标）
+                auto DrawColorControl = [&](const char* label, float* col3) -> bool {
+                    ImGui::ColorEdit3(label, col3);
+                    // 只有当用户松开鼠标或回车确认时，才返回 true
+                    return ImGui::IsItemDeactivatedAfterEdit();
+                };
+
+                bool editFinished = false;
+
+                // 绘制控件，env 的值会实时改变，所以背景会实时变色（因为 drawSkybox 每帧都读 env）
+                // 但是 editFinished 只有在松手时才会变 true
+                editFinished |= DrawColorControl("Zenith", &env.skyZenithColor.x);
+                editFinished |= DrawColorControl("Horizon", &env.skyHorizonColor.x);
+                editFinished |= DrawColorControl("Ground", &env.groundColor.x);
+                
+                // Energy 也是同理
                 ImGui::DragFloat("Energy", &env.skyEnergy, 0.1f, 0.0f, 10.0f);
+                if (ImGui::IsItemDeactivatedAfterEdit()) editFinished = true;
+
+                // 只有在编辑动作“完成”时，才触发昂贵的 IBL 烘焙
+                if (editFinished) {
+                    renderer->updateProceduralSkybox(env);
+                }
             } 
             else if (env.type == SkyboxType::CubeMap) {
                 // 显示当前路径

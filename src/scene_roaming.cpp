@@ -3,6 +3,7 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include "scene_roaming.h"
+#include "editor/editor_style.h"
 #include "ImGuiFileDialog.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/easing.hpp>
@@ -87,40 +88,10 @@ void SceneRoaming::initImGui()
 
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
-    ImGui::StyleColorsDark(); // 使用暗色主题
+    EditorStyle::init(_contentScale);
 
     ImGui_ImplGlfw_InitForOpenGL(_window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
-
-    // --- High DPI 适配逻辑 ---
-
-    // 1. 缩放 UI 样式 (按钮大小、间距等)
-    if (_contentScale > 1.0f)
-    {
-        ImGuiStyle& style = ImGui::GetStyle();
-        style.ScaleAllSizes(_contentScale);
-    }
-
-    // 2. 缩放字体
-    // ImGui 默认字体是位图字体，直接缩放会模糊。
-    // 强烈建议加载一个 TTF 字体并指定像素大小。
-    // Windows 路径示例 (你可以换成你的项目内的字体路径 "media/fonts/arial.ttf")
-    std::string fontPath = getAssetFullPath("media/fonts/Roboto-Regular.ttf");
-    // 如果没有字体文件，可以用 Windows 自带的，或者暂时忽略字体清晰度
-    // fontPath = "C:\\Windows\\Fonts\\segoeui.ttf"; 
-    std::cout << "[Info] Attempting to load font from: " << fontPath << std::endl;
-    
-    float fontSize = 16.0f * _contentScale; // 基础字号 16
-
-    if (std::filesystem::exists(fontPath)) 
-    {
-        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), fontSize);
-    }
-    else
-    {
-        // 如果找不到字体，使用默认字体并缩放 (可能会模糊)
-        io.FontGlobalScale = _contentScale;
-    }
 }
 
 void SceneRoaming::renderFrame()
@@ -310,7 +281,7 @@ void SceneRoaming::setupDockspace()
 
     // 如果需要重置，或者第一次运行且没有 ini 记录
     // (ImGui::DockBuilderGetNode 判断该 ID 是否已存在)
-    if (!_isLayoutInitialized || (ImGui::DockBuilderGetNode(dockspace_id) == NULL))
+    if (!_isLayoutInitialized)
     {
         // 1. 清除当前所有布局
         ImGui::DockBuilderRemoveNode(dockspace_id); 
@@ -342,8 +313,9 @@ void SceneRoaming::setupDockspace()
         // 注意：这里的字符串必须和你 Begin() 里的名字完全一致！
         ImGui::DockBuilderDockWindow("3D Viewport", dock_main_id);
         ImGui::DockBuilderDockWindow("Scene Hierarchy", dock_left_id);
-        ImGui::DockBuilderDockWindow("Inspector", dock_right_id);
         ImGui::DockBuilderDockWindow("Project / Assets", dock_bottom_id);
+        ImGui::DockBuilderDockWindow("Inspector", dock_right_id);
+        ImGui::DockBuilderDockWindow("Environment", dock_right_id);
 
         // 5. 完成构建
         ImGui::DockBuilderFinish(dockspace_id);
@@ -373,12 +345,12 @@ void SceneRoaming::setupDockspace()
                 ImGuiFileDialog::Instance()->OpenDialog("ImportMeshKey", "Import Single Mesh", ".obj", config);
             }
 
-            if (ImGui::MenuItem("Import as Scene (.obj)"))
+            if (ImGui::MenuItem("Import as Scene (auto)"))
             {
                 IGFD::FileDialogConfig config;
                 config.path = ResourceManager::Get().getProjectRoot();
                 
-                ImGuiFileDialog::Instance()->OpenDialog("ImportSceneKey", "Import Scene and Split Objects", ".obj", config);
+                ImGuiFileDialog::Instance()->OpenDialog("ImportSceneKey", "Import Scene and Split Objects", ".obj,.gltf,.glb", config);
             }
 
             if (ImGui::IsItemHovered()) {
@@ -417,11 +389,25 @@ void SceneRoaming::setupDockspace()
             if (ImGui::MenuItem("Exit")) glfwSetWindowShouldClose(_window, true);
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("View"))
+
+        if (ImGui::BeginMenu("Window"))
         {
+            // 通过 getOpenPtr() 获取面板内部 bool 指针，实现双向绑定
+            // 如果面板被关闭，这里取消勾选；在这里勾选，面板会重新打开
+            if (_sceneViewPanel) ImGui::MenuItem("3D Viewport", nullptr, _sceneViewPanel->getOpenPtr());
+            if (_hierarchyPanel) ImGui::MenuItem("Hierarchy", nullptr, _hierarchyPanel->getOpenPtr());
+            if (_inspectorPanel) ImGui::MenuItem("Inspector", nullptr, _inspectorPanel->getOpenPtr());
+            if (_projectPanel)   ImGui::MenuItem("Project", nullptr, _projectPanel->getOpenPtr());
+            if (_envPanel)       ImGui::MenuItem("Environment", nullptr, _envPanel->getOpenPtr());
+
+            ImGui::Separator();
+            
+            // 重置布局按钮移到这里比较合适
             if (ImGui::MenuItem("Reset Layout")) _isLayoutInitialized = false;
+
             ImGui::EndMenu();
         }
+
         ImGui::EndMainMenuBar();
     }
 
@@ -452,7 +438,7 @@ void SceneRoaming::setupDockspace()
             
             // 调用我们刚刚写好的 Import 逻辑
             if (_scene) {
-                _scene->importSceneFromOBJ(path);
+                _scene->importScene(path);
             }
         }
         

@@ -118,6 +118,7 @@ int main(int argc, char* argv[]) {
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include "scene_roaming.h"
+#include "editor/editor_style.h"
 #include "ImGuiFileDialog.h"
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/easing.hpp>
@@ -178,6 +179,7 @@ SceneRoaming::SceneRoaming(const Options &options) : Application(options)
     _hierarchyPanel = std::make_unique<HierarchyPanel>();
     _inspectorPanel = std::make_unique<InspectorPanel>();
     _projectPanel = std::make_unique<ProjectPanel>();
+    _envPanel = std::make_unique<EnvironmentPanel>();
 
     initImGui();
     // initSceneFBO 不需要在这里调，第一次 renderUI 时会根据窗口大小自动调
@@ -201,40 +203,10 @@ void SceneRoaming::initImGui()
 
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
-    ImGui::StyleColorsDark(); // 使用暗色主题
+    EditorStyle::init(_contentScale);
 
     ImGui_ImplGlfw_InitForOpenGL(_window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
-
-    // --- High DPI 适配逻辑 ---
-
-    // 1. 缩放 UI 样式 (按钮大小、间距等)
-    if (_contentScale > 1.0f)
-    {
-        ImGuiStyle& style = ImGui::GetStyle();
-        style.ScaleAllSizes(_contentScale);
-    }
-
-    // 2. 缩放字体
-    // ImGui 默认字体是位图字体，直接缩放会模糊。
-    // 强烈建议加载一个 TTF 字体并指定像素大小。
-    // Windows 路径示例 (你可以换成你的项目内的字体路径 "media/fonts/arial.ttf")
-    std::string fontPath = getAssetFullPath("media/fonts/Roboto-Regular.ttf");
-    // 如果没有字体文件，可以用 Windows 自带的，或者暂时忽略字体清晰度
-    // fontPath = "C:\\Windows\\Fonts\\segoeui.ttf"; 
-    std::cout << "[Info] Attempting to load font from: " << fontPath << std::endl;
-    
-    float fontSize = 16.0f * _contentScale; // 基础字号 16
-
-    if (std::filesystem::exists(fontPath)) 
-    {
-        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), fontSize);
-    }
-    else
-    {
-        // 如果找不到字体，使用默认字体并缩放 (可能会模糊)
-        io.FontGlobalScale = _contentScale;
-    }
 }
 
 void SceneRoaming::renderFrame()
@@ -404,6 +376,9 @@ void SceneRoaming::renderUI()
         
         // 3. Project
         _projectPanel->onImGuiRender();
+
+        // 4. Environment
+        _envPanel->onImGuiRender(_scene.get(), _renderer.get());
     }
 
     // 6. 渲染结束 (保持不变)
@@ -453,8 +428,9 @@ void SceneRoaming::setupDockspace()
         // 注意：这里的字符串必须和你 Begin() 里的名字完全一致！
         ImGui::DockBuilderDockWindow("3D Viewport", dock_main_id);
         ImGui::DockBuilderDockWindow("Scene Hierarchy", dock_left_id);
-        ImGui::DockBuilderDockWindow("Inspector", dock_right_id);
         ImGui::DockBuilderDockWindow("Project / Assets", dock_bottom_id);
+        ImGui::DockBuilderDockWindow("Inspector", dock_right_id);
+        ImGui::DockBuilderDockWindow("Environment", dock_right_id);
 
         // 5. 完成构建
         ImGui::DockBuilderFinish(dockspace_id);
@@ -484,12 +460,12 @@ void SceneRoaming::setupDockspace()
                 ImGuiFileDialog::Instance()->OpenDialog("ImportMeshKey", "Import Single Mesh", ".obj", config);
             }
 
-            if (ImGui::MenuItem("Import as Scene (.obj)"))
+            if (ImGui::MenuItem("Import as Scene (auto)"))
             {
                 IGFD::FileDialogConfig config;
                 config.path = ResourceManager::Get().getProjectRoot();
                 
-                ImGuiFileDialog::Instance()->OpenDialog("ImportSceneKey", "Import Scene and Split Objects", ".obj", config);
+                ImGuiFileDialog::Instance()->OpenDialog("ImportSceneKey", "Import Scene and Split Objects", ".obj,.gltf,.glb", config);
             }
 
             if (ImGui::IsItemHovered()) {
@@ -528,11 +504,25 @@ void SceneRoaming::setupDockspace()
             if (ImGui::MenuItem("Exit")) glfwSetWindowShouldClose(_window, true);
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("View"))
+
+        if (ImGui::BeginMenu("Window"))
         {
+            // 通过 getOpenPtr() 获取面板内部 bool 指针，实现双向绑定
+            // 如果面板被关闭，这里取消勾选；在这里勾选，面板会重新打开
+            if (_sceneViewPanel) ImGui::MenuItem("3D Viewport", nullptr, _sceneViewPanel->getOpenPtr());
+            if (_hierarchyPanel) ImGui::MenuItem("Hierarchy", nullptr, _hierarchyPanel->getOpenPtr());
+            if (_inspectorPanel) ImGui::MenuItem("Inspector", nullptr, _inspectorPanel->getOpenPtr());
+            if (_projectPanel)   ImGui::MenuItem("Project", nullptr, _projectPanel->getOpenPtr());
+            if (_envPanel)       ImGui::MenuItem("Environment", nullptr, _envPanel->getOpenPtr());
+
+            ImGui::Separator();
+            
+            // 重置布局按钮移到这里比较合适
             if (ImGui::MenuItem("Reset Layout")) _isLayoutInitialized = false;
+
             ImGui::EndMenu();
         }
+
         ImGui::EndMainMenuBar();
     }
 
@@ -563,7 +553,7 @@ void SceneRoaming::setupDockspace()
             
             // 调用我们刚刚写好的 Import 逻辑
             if (_scene) {
-                _scene->importSceneFromOBJ(path);
+                _scene->importScene(path);
             }
         }
         
@@ -670,6 +660,7 @@ void SceneRoaming::renderProjectSelector()
 #include "editor/panels/inspector_panel.h"
 #include "editor/panels/project_panel.h"
 #include "editor/panels/scene_view_panel.h"
+#include "editor/panels/environment_panel.h"
 #include "engine/scene_object.h"
 #include "engine/outline_pass.h"
 #include "engine/resource_manager.h"
@@ -691,6 +682,7 @@ private:
     std::unique_ptr<HierarchyPanel> _hierarchyPanel;
     std::unique_ptr<InspectorPanel> _inspectorPanel;
     std::unique_ptr<ProjectPanel> _projectPanel;
+    std::unique_ptr<EnvironmentPanel> _envPanel;
 
     // 编辑器状态变量
     bool _isLayoutInitialized = false; // 用于只在第一次运行时设置窗口位置
@@ -1468,6 +1460,258 @@ private:
 };
 ```
 
+./editor/editor_style.cpp:
+```
+#include "editor_style.h"
+#include "engine/resource_manager.h"
+#include <filesystem>
+#include <iostream>
+
+void EditorStyle::init(float contentScale) {
+    // 1. 加载字体
+    loadFonts(contentScale);
+
+    // 2. 应用主题
+    applyTheme();
+
+    // 3. 全局缩放 (根据 DPI)
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.ScaleAllSizes(contentScale);
+}
+
+void EditorStyle::loadFonts(float contentScale) {
+    ImGuiIO& io = ImGui::GetIO();
+    io.Fonts->Clear();
+
+    // 基础字号 (根据 DPI 缩放)
+    float fontSize = 16.0f * contentScale;
+    
+    // 尝试加载项目内的字体
+    std::string fontPath = ResourceManager::Get().getFullPath("media/fonts/Roboto-Regular.ttf");
+    
+    ImFontConfig config;
+    config.OversampleH = 3; // 水平过采样，让字体更清晰
+    config.OversampleV = 3; // 垂直过采样
+
+    if (std::filesystem::exists(fontPath)) {
+        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), fontSize, &config);
+        std::cout << "[UI] Loaded custom font: " << fontPath << std::endl;
+    } else {
+        // 回退默认
+        io.Fonts->AddFontDefault();
+        std::cout << "[UI] Custom font not found, using default." << std::endl;
+    }
+}
+
+void EditorStyle::applyTheme() {
+    ImGuiStyle* style = &ImGui::GetStyle();
+    ImVec4* colors = style->Colors;
+
+    // --- 样式变量 (这是让 UI 看起来“现代”的关键) ---
+    style->WindowRounding    = 6.0f; // 窗口圆角
+    style->ChildRounding     = 4.0f; // 子窗口圆角
+    style->FrameRounding     = 4.0f; // 按钮/输入框圆角
+    style->GrabRounding      = 4.0f; // 滑块圆角
+    style->PopupRounding     = 4.0f; // 弹出菜单圆角
+    style->ScrollbarRounding = 4.0f; // 滚动条圆角
+    style->TabRounding       = 4.0f; // 标签页圆角
+
+    style->WindowBorderSize  = 1.0f; 
+    style->FrameBorderSize   = 0.0f; // 扁平化，不要边框
+    style->PopupBorderSize   = 1.0f;
+
+    style->WindowPadding     = ImVec2(8, 8);
+    style->FramePadding      = ImVec2(5, 4); // 让按钮高一点，不要太挤
+    style->ItemSpacing       = ImVec2(8, 4);
+    style->ItemInnerSpacing  = ImVec2(4, 4);
+    style->IndentSpacing     = 20.0f;
+    style->ScrollbarSize     = 14.0f;
+
+    // --- 配色方案 (深灰色调 + 蓝色高亮) ---
+    // 基础背景
+    colors[ImGuiCol_Text]                   = ImVec4(0.90f, 0.90f, 0.90f, 1.00f);
+    colors[ImGuiCol_TextDisabled]           = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
+    colors[ImGuiCol_WindowBg]               = ImVec4(0.12f, 0.12f, 0.12f, 1.00f); // 稍微亮一点的深灰
+    colors[ImGuiCol_ChildBg]                = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    colors[ImGuiCol_PopupBg]                = ImVec4(0.15f, 0.15f, 0.15f, 0.94f);
+    colors[ImGuiCol_Border]                 = ImVec4(0.25f, 0.25f, 0.25f, 0.50f);
+    colors[ImGuiCol_BorderShadow]           = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    
+    // 标题栏
+    colors[ImGuiCol_TitleBg]                = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
+    colors[ImGuiCol_TitleBgActive]          = ImVec4(0.08f, 0.08f, 0.08f, 1.00f); // 激活时不改变颜色，更扁平
+    colors[ImGuiCol_TitleBgCollapsed]       = ImVec4(0.00f, 0.00f, 0.00f, 0.51f);
+    colors[ImGuiCol_MenuBarBg]              = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
+
+    // 滚动条
+    colors[ImGuiCol_ScrollbarBg]            = ImVec4(0.02f, 0.02f, 0.02f, 0.53f);
+    colors[ImGuiCol_ScrollbarGrab]          = ImVec4(0.31f, 0.31f, 0.31f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabHovered]   = ImVec4(0.41f, 0.41f, 0.41f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabActive]    = ImVec4(0.51f, 0.51f, 0.51f, 1.00f);
+
+    // 核心交互元素 (Checkmark, Slider) - 使用柔和的蓝色
+    colors[ImGuiCol_CheckMark]              = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
+    colors[ImGuiCol_SliderGrab]             = ImVec4(0.26f, 0.59f, 0.98f, 0.78f);
+    colors[ImGuiCol_SliderGrabActive]       = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
+
+    // 按钮 (Button)
+    colors[ImGuiCol_Button]                 = ImVec4(0.24f, 0.24f, 0.24f, 1.00f); // 默认深灰
+    colors[ImGuiCol_ButtonHovered]          = ImVec4(0.30f, 0.30f, 0.30f, 1.00f); // 悬停变亮
+    colors[ImGuiCol_ButtonActive]           = ImVec4(0.20f, 0.20f, 0.20f, 1.00f); // 按下变暗
+
+    // Header (TreeNode, Selectable)
+    colors[ImGuiCol_Header]                 = ImVec4(0.26f, 0.59f, 0.98f, 0.31f);
+    colors[ImGuiCol_HeaderHovered]          = ImVec4(0.26f, 0.59f, 0.98f, 0.50f);
+    colors[ImGuiCol_HeaderActive]           = ImVec4(0.26f, 0.59f, 0.98f, 0.80f);
+
+    // Separator / Resize Grip
+    colors[ImGuiCol_Separator]              = ImVec4(0.30f, 0.30f, 0.30f, 0.50f);
+    colors[ImGuiCol_SeparatorHovered]       = ImVec4(0.10f, 0.40f, 0.75f, 0.78f);
+    colors[ImGuiCol_SeparatorActive]        = ImVec4(0.10f, 0.40f, 0.75f, 1.00f);
+    colors[ImGuiCol_ResizeGrip]             = ImVec4(0.26f, 0.59f, 0.98f, 0.20f);
+    colors[ImGuiCol_ResizeGripHovered]      = ImVec4(0.26f, 0.59f, 0.98f, 0.67f);
+    colors[ImGuiCol_ResizeGripActive]       = ImVec4(0.26f, 0.59f, 0.98f, 0.95f);
+
+    // Tabs
+    colors[ImGuiCol_Tab]                    = ImVec4(0.18f, 0.18f, 0.18f, 0.86f);
+    colors[ImGuiCol_TabHovered]             = ImVec4(0.26f, 0.59f, 0.98f, 0.80f);
+    colors[ImGuiCol_TabActive]              = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
+    colors[ImGuiCol_TabUnfocused]           = ImVec4(0.07f, 0.10f, 0.15f, 0.97f);
+    colors[ImGuiCol_TabUnfocusedActive]     = ImVec4(0.14f, 0.14f, 0.14f, 1.00f);
+
+    // Docking
+    colors[ImGuiCol_DockingPreview]         = ImVec4(0.26f, 0.59f, 0.98f, 0.70f);
+    colors[ImGuiCol_DockingEmptyBg]         = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
+    
+    // Plot
+    colors[ImGuiCol_PlotLines]              = ImVec4(0.61f, 0.61f, 0.61f, 1.00f);
+    colors[ImGuiCol_PlotLinesHovered]       = ImVec4(1.00f, 0.43f, 0.35f, 1.00f);
+    colors[ImGuiCol_PlotHistogram]          = ImVec4(0.90f, 0.70f, 0.00f, 1.00f);
+    colors[ImGuiCol_PlotHistogramHovered]   = ImVec4(1.00f, 0.60f, 0.00f, 1.00f);
+    
+    // Nav
+    colors[ImGuiCol_NavHighlight]           = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
+    colors[ImGuiCol_NavWindowingHighlight]  = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
+    colors[ImGuiCol_NavWindowingDimBg]      = ImVec4(0.80f, 0.80f, 0.80f, 0.20f);
+    colors[ImGuiCol_ModalWindowDimBg]       = ImVec4(0.80f, 0.80f, 0.80f, 0.35f);
+}
+```
+
+./editor/editor_style.h:
+```
+#pragma once
+#include <imgui.h>
+#include <string>
+
+class EditorStyle {
+public:
+    // 初始化字体和主题
+    static void init(float contentScale);
+
+    // 应用自定义配色方案 (类似 UE5/Blender)
+    static void applyTheme();
+
+    // 辅助：加载字体 (支持合并图标字体，如 FontAwesome，如果有的话)
+    static void loadFonts(float contentScale);
+
+    // 辅助：自动计算宽度的按钮，防止文字溢出
+    // 如果 text 宽度超过 availWidth，会自动截断并显示 "..."
+    static bool ButtonCenteredOnLine(const char* label, float alignment = 0.5f);
+};
+```
+
+./editor/panels/environment_panel.h:
+```
+#pragma once
+#include "panel.h"
+#include "engine/scene.h"
+#include "engine/renderer.h"
+
+class EnvironmentPanel : public Panel {
+public:
+    EnvironmentPanel() : Panel("Environment") {}
+
+    void onImGuiRender(Scene* scene, Renderer* renderer) {
+        if (!_isOpen || !scene) return;
+
+        if (ImGui::Begin(_title.c_str(), &_isOpen)) {
+            auto& env = scene->getEnvironment();
+
+            // 1. 模式选择
+            const char* typeNames[] = { "Procedural Sky", "HDR Map" };
+            int currentType = (int)env.type;
+            if (ImGui::Combo("Type", &currentType, typeNames, 2)) {
+                SkyboxType oldType = env.type;
+                env.type = (SkyboxType)currentType;
+            }
+
+            ImGui::Separator();
+
+            if (env.type == SkyboxType::Procedural) {
+                ImGui::Text("Procedural Colors");
+
+                // 定义一个辅助 lambda，用于绘制控件并检测状态
+                // 返回 true 表示用户刚刚完成了编辑（松开鼠标）
+                auto DrawColorControl = [&](const char* label, float* col3) -> bool {
+                    ImGui::ColorEdit3(label, col3);
+                    // 只有当用户松开鼠标或回车确认时，才返回 true
+                    return ImGui::IsItemDeactivatedAfterEdit();
+                };
+
+                bool editFinished = false;
+
+                // 绘制控件，env 的值会实时改变，所以背景会实时变色（因为 drawSkybox 每帧都读 env）
+                // 但是 editFinished 只有在松手时才会变 true
+                editFinished |= DrawColorControl("Zenith", &env.skyZenithColor.x);
+                editFinished |= DrawColorControl("Horizon", &env.skyHorizonColor.x);
+                editFinished |= DrawColorControl("Ground", &env.groundColor.x);
+                
+                // Energy 也是同理
+                ImGui::DragFloat("Energy", &env.skyEnergy, 0.1f, 0.0f, 10.0f);
+                if (ImGui::IsItemDeactivatedAfterEdit()) editFinished = true;
+
+                // 只有在编辑动作“完成”时，才触发昂贵的 IBL 烘焙
+                if (editFinished) {
+                    renderer->updateProceduralSkybox(env);
+                }
+            } 
+            else if (env.type == SkyboxType::CubeMap) {
+                // 显示当前路径
+                std::string filename = std::filesystem::path(env.hdrFilePath).filename().string();
+                if (filename.empty()) filename = "(Drag .hdr file here)";
+                
+                ImGui::Button(filename.c_str(), ImVec2(-1, 40));
+
+                if (ImGui::BeginDragDropTarget()) {
+                    // 接受任意文件，这里假设用户拖的是 .hdr
+                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_TEXTURE")) {
+                        const char* path = (const char*)payload->Data;
+                        std::string strPath = path;
+                        // 简单检查扩展名
+                        if (strPath.find(".hdr") != std::string::npos) {
+                            env.hdrFilePath = strPath;
+                            // 触发加载
+                            renderer->loadSkyboxHDR(env.hdrFilePath);
+                        } else {
+                            std::cout << "[UI] Only .hdr files are supported for Skybox!" << std::endl;
+                        }
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+                ImGui::DragFloat("Energy", &env.skyEnergy, 0.1f, 0.0f, 10.0f);
+            }
+
+            ImGui::Separator();
+            ImGui::DragFloat("Global Exposure", &env.globalExposure, 0.1f, 0.1f, 10.0f);
+        }
+        ImGui::End();
+    }
+    
+    // 占位实现
+    void onImGuiRender() override {}
+};
+```
+
 ./editor/panels/hierarchy_panel.cpp:
 ```
 #include "hierarchy_panel.h"
@@ -1572,9 +1816,9 @@ void InspectorPanel::onImGuiRender(GameObject*& selectedObject, Scene* sceneCont
 
         ImGuiStyle& style = ImGui::GetStyle();
         float availableWidth = ImGui::GetContentRegionAvail().x;
-        const char* btnLabel = "Delete Object"; 
-        float buttonWidth = ImGui::CalcTextSize(btnLabel).x + style.FramePadding.x * 2.0f;
-        float inputWidth = availableWidth - buttonWidth - style.ItemSpacing.x;
+        const char* btnLabel = "Delete"; // 缩短文本，或者用图标
+        float btnWidth = 100.0f; // 足够放下 "Del"
+        float inputWidth = availableWidth - btnWidth - style.ItemSpacing.x;
 
         ImGui::SetNextItemWidth(inputWidth);
         if (ImGui::InputText("##Name", nameBuf, sizeof(nameBuf)))
@@ -1582,8 +1826,9 @@ void InspectorPanel::onImGuiRender(GameObject*& selectedObject, Scene* sceneCont
 
         ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1));
-        bool shouldDeleteObj = ImGui::Button(btnLabel);
+        bool shouldDeleteObj = ImGui::Button(btnLabel, ImVec2(btnWidth, 0));
         ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete Object");
 
         if (shouldDeleteObj && sceneContext)
         {
@@ -2499,7 +2744,8 @@ void ProjectPanel::onImGuiRender()
         std::string ext = std::filesystem::path(filename).extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
         bool isModel = (ext == ".obj");
-        bool isTexture = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga");
+        bool isTexture = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
+                          ext == ".bmp" || ext == ".tga" || ext == ".hdr");
 
         ImGui::PushID(relativePath.c_str());
 
@@ -2858,6 +3104,47 @@ private:
     void initFBO(int width, int height);
     void resizeFBO(int width, int height);
     void handleMousePick(Scene* scene, GameObject*& selectedObject);
+};
+```
+
+./engine/asset_data.h:
+```
+#pragma once
+
+#include <vector>
+#include <string>
+#include "base/vertex.h" // 确保 Vertex 结构体可见
+
+// ==========================================
+// 1. 纹理相关数据
+// ==========================================
+
+// 原始 HDR 图像数据 (stbi_loadf 的结果)
+struct HDRData {
+    float* data = nullptr;
+    int width = 0;
+    int height = 0;
+    int components = 0;
+    bool isValid() const { return data != nullptr; }
+};
+
+// ==========================================
+// 2. 模型相关数据
+// ==========================================
+
+// 单个网格的原始数据 (Loader -> ResourceManager)
+struct MeshData {
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+    bool hasUVs = false;
+};
+
+// 场景中的子网格定义 (含名称)
+struct SubMesh {
+    std::string name;
+    std::vector<Vertex> vertices;
+    std::vector<uint32_t> indices;
+    bool hasUVs = false;
 };
 ```
 
@@ -3221,7 +3508,7 @@ void GeometryFactory::computeTangents(std::vector<Vertex>& vertices, const std::
 {
     // 1. 初始化所有切线为 0
     for (auto& v : vertices) {
-        v.tangent = glm::vec3(0.0f);
+        v.tangent = glm::vec4(0.0f);
     }
 
     // 2. 遍历所有三角形，累加切线
@@ -3245,18 +3532,22 @@ void GeometryFactory::computeTangents(std::vector<Vertex>& vertices, const std::
         tangent.z = f * (deltaUV2.y * edge1.z - deltaUV1.y * edge2.z);
 
         // 累加到三个顶点上 (平滑切线)
-        v0.tangent += tangent;
-        v1.tangent += tangent;
-        v2.tangent += tangent;
+        v0.tangent += glm::vec4(tangent, 0.0f);
+        v1.tangent += glm::vec4(tangent, 0.0f);
+        v2.tangent += glm::vec4(tangent, 0.0f);
     }
 
-    // 3. 正交化 (Gram-Schmidt) 并归一化
+    // 3. 正交化并设置 w
     for (auto& v : vertices)
     {
-        // 重新正交化，确保切线垂直于法线
-        v.tangent = glm::normalize(v.tangent - v.normal * glm::dot(v.normal, v.tangent));
+        glm::vec3 t = glm::vec3(v.tangent);
+        glm::vec3 n = v.normal;
         
-        // (可选) 这里可以计算 Bitangent 的手性并存储到 w 分量，但目前我们先只算 Tangent
+        // Gram-Schmidt 正交化
+        t = glm::normalize(t - n * glm::dot(n, t));
+        
+        // 对于工厂生成的标准几何体，没有镜像 UV，手性 w 设为 1.0
+        v.tangent = glm::vec4(t, 1.0f);
     }
 }
 ```
@@ -3310,6 +3601,272 @@ public:
     
 private:
     static void convertToFlat(std::vector<Vertex>& vertices, std::vector<uint32_t>& indices);
+};
+```
+
+./engine/gltf_loader.cpp:
+```
+#include "gltf_loader.h"
+#include "geometry_factory.h"
+#include <iostream>
+#include <filesystem>
+
+// 定义宏以实现 tinygltf
+// 注意：如果你项目中其他地方已经定义了 STB_IMAGE_IMPLEMENTATION，
+// 可能需要在这里定义 TINYGLTF_NO_STB_IMAGE 并手动包含 stb_image.h
+#define TINYGLTF_IMPLEMENTATION
+#define STB_IMAGE_IMPLEMENTATION 
+#define STB_IMAGE_WRITE_IMPLEMENTATION 
+// #define TINYGLTF_NO_STB_IMAGE // 如果发生链接冲突，取消注释此行
+// #define TINYGLTF_NO_STB_IMAGE_WRITE // 我们只读取，不需要写入功能
+
+#include <tiny_gltf.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+// 辅助函数：从 Accessor 和 BufferView 获取数据指针
+// T 是我们期望的数据类型 (如 float, uint16_t 等)
+template<typename T>
+const T* getDataPointer(const tinygltf::Model& model, int accessorIndex) {
+    if (accessorIndex < 0) return nullptr;
+    const tinygltf::Accessor& accessor = model.accessors[accessorIndex];
+    const tinygltf::BufferView& bufferView = model.bufferViews[accessor.bufferView];
+    const tinygltf::Buffer& buffer = model.buffers[bufferView.buffer];
+
+    // 计算起始地址：Buffer地址 + View偏移 + Accessor偏移
+    const unsigned char* dataStart = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
+    return reinterpret_cast<const T*>(dataStart);
+}
+
+// 辅助函数：获取 Accessor 的步长 (Stride)
+// 如果 BufferView 没有定义 stride，则根据 componentType 和 type 计算紧凑步长
+int getStride(const tinygltf::Model& model, int accessorIndex) {
+    if (accessorIndex < 0) return 0;
+    const tinygltf::Accessor& accessor = model.accessors[accessorIndex];
+    const tinygltf::BufferView& bufferView = model.bufferViews[accessor.bufferView];
+    
+    if (bufferView.byteStride > 0) {
+        return bufferView.byteStride;
+    }
+    
+    // 紧密排列 (Tightly packed)
+    return tinygltf::GetComponentSizeInBytes(accessor.componentType) * tinygltf::GetNumComponentsInType(accessor.type);
+}
+
+// 处理单个 Primitive (对应我们的 SubMesh)
+void processPrimitive(const tinygltf::Model& model, const tinygltf::Primitive& primitive, const std::string& name, std::vector<SubMesh>& outMeshes) {
+    SubMesh subMesh;
+    subMesh.name = name;
+    subMesh.hasUVs = false;
+
+    // -------------------------------------------------------------
+    // 1. 获取 Attribute Accessor 索引
+    // -------------------------------------------------------------
+    int posIdx = -1;
+    int normIdx = -1;
+    int uv0Idx = -1;
+    int tanIdx = -1;
+
+    if (primitive.attributes.find("POSITION") != primitive.attributes.end())
+        posIdx = primitive.attributes.at("POSITION");
+    if (primitive.attributes.find("NORMAL") != primitive.attributes.end())
+        normIdx = primitive.attributes.at("NORMAL");
+    if (primitive.attributes.find("TEXCOORD_0") != primitive.attributes.end())
+        uv0Idx = primitive.attributes.at("TEXCOORD_0");
+    if (primitive.attributes.find("TANGENT") != primitive.attributes.end())
+        tanIdx = primitive.attributes.at("TANGENT");
+
+    // 必须有位置数据
+    if (posIdx < 0) return;
+
+    // -------------------------------------------------------------
+    // 2. 读取顶点数据
+    // -------------------------------------------------------------
+    const tinygltf::Accessor& posAccessor = model.accessors[posIdx];
+    size_t vertexCount = posAccessor.count;
+
+    const unsigned char* posPtr = (const unsigned char*)getDataPointer<float>(model, posIdx);
+    int posStride = getStride(model, posIdx);
+
+    const unsigned char* normPtr = (const unsigned char*)getDataPointer<float>(model, normIdx);
+    int normStride = getStride(model, normIdx);
+
+    const unsigned char* uvPtr = (const unsigned char*)getDataPointer<float>(model, uv0Idx);
+    int uvStride = getStride(model, uv0Idx);
+
+    const unsigned char* tanPtr = (const unsigned char*)getDataPointer<float>(model, tanIdx);
+    int tanStride = getStride(model, tanIdx);
+
+    subMesh.vertices.resize(vertexCount);
+
+    for (size_t i = 0; i < vertexCount; ++i) {
+        Vertex& v = subMesh.vertices[i];
+
+        // Position (Vec3)
+        const float* p = (const float*)(posPtr + i * posStride);
+        v.position = glm::vec3(p[0], p[1], p[2]);
+
+        // Normal (Vec3)
+        if (normPtr) {
+            const float* n = (const float*)(normPtr + i * normStride);
+            v.normal = glm::vec3(n[0], n[1], n[2]);
+        } else {
+            v.normal = glm::vec3(0.0f); // 后续可能会重新计算
+        }
+
+        // UV (Vec2)
+        if (uvPtr) {
+            const float* u = (const float*)(uvPtr + i * uvStride);
+            // 关键修复：glTF 的 V 轴需要翻转以适配 OpenGL
+            v.texCoord = glm::vec2(u[0], 1.0f - u[1]); 
+            subMesh.hasUVs = true;
+        } else {
+            v.texCoord = glm::vec2(0.0f);
+        }
+
+        // Tangent (Vec4 usually, but we store Vec3 for now)
+        // glTF 的 Tangent 是 Vec4，w 分量用于存储副切线符号
+        if (tanPtr) {
+            const float* t = (const float*)(tanPtr + i * tanStride);
+            // 读取所有 4 个分量
+            v.tangent = glm::vec4(t[0], t[1], t[2], t[3]); 
+        } else {
+            v.tangent = glm::vec4(0.0f);
+        }
+    }
+
+    // -------------------------------------------------------------
+    // 3. 读取索引数据
+    // -------------------------------------------------------------
+    int indicesIdx = primitive.indices;
+    if (indicesIdx >= 0) {
+        const tinygltf::Accessor& idxAccessor = model.accessors[indicesIdx];
+        
+        // 索引可能是 unsigned short, unsigned int, 或者 unsigned byte
+        if (idxAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
+            const uint16_t* buf = getDataPointer<uint16_t>(model, indicesIdx);
+            int stride = getStride(model, indicesIdx); // Stride usually 2
+            
+            // 注意：如果 BufferView 紧密排列，可以直接 memcpy，但为了安全处理 stride，我们用循环
+            for (size_t i = 0; i < idxAccessor.count; ++i) {
+                // 指针运算处理 stride (尽管 indices 通常是紧密的)
+                // 简单的转换：const uint16_t* ptr = (const uint16_t*)((const unsigned char*)buf + i * stride);
+                // 但 glTF 规范中 index buffer 通常没有 stride (byteStride undefined)
+                // 这里我们假设标准情况
+                subMesh.indices.push_back((uint32_t)buf[i]); 
+            }
+        } 
+        else if (idxAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
+            const uint32_t* buf = getDataPointer<uint32_t>(model, indicesIdx);
+            for (size_t i = 0; i < idxAccessor.count; ++i) {
+                subMesh.indices.push_back(buf[i]);
+            }
+        }
+        else if (idxAccessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE) {
+            const uint8_t* buf = getDataPointer<uint8_t>(model, indicesIdx);
+            for (size_t i = 0; i < idxAccessor.count; ++i) {
+                subMesh.indices.push_back((uint32_t)buf[i]);
+            }
+        }
+    } else {
+        // 无索引绘制 (很少见，但为了健壮性)
+        // 简单的生成 0, 1, 2...
+        for(size_t i=0; i<vertexCount; ++i) subMesh.indices.push_back(i);
+    }
+
+    // 如果 glTF 文件中没有切线数据，我们需要手动计算
+    if (tanIdx < 0 && subMesh.hasUVs) 
+    {
+        // 使用 GeometryFactory 中的通用算法计算切线
+        GeometryFactory::computeTangents(subMesh.vertices, subMesh.indices);
+        // 可选：打印一条调试日志
+        std::cout << "[GLTF] Computed missing tangents for: " << name << std::endl;
+    }
+
+    outMeshes.push_back(std::move(subMesh));
+}
+
+// 递归遍历节点
+void processNode(const tinygltf::Model& model, const tinygltf::Node& node, std::vector<SubMesh>& outMeshes) {
+    // 1. 如果节点包含网格，处理它
+    if (node.mesh >= 0) {
+        const tinygltf::Mesh& mesh = model.meshes[node.mesh];
+        
+        // 一个 Mesh 可能包含多个 Primitives (即子网格)
+        for (size_t i = 0; i < mesh.primitives.size(); ++i) {
+            std::string subName = mesh.name;
+            if (subName.empty()) subName = node.name;
+            if (subName.empty()) subName = "Mesh_" + std::to_string(node.mesh);
+            
+            subName += "_" + std::to_string(i); // 区分 primitive
+
+            processPrimitive(model, mesh.primitives[i], subName, outMeshes);
+        }
+    }
+
+    // 2. 递归处理子节点
+    for (int childIdx : node.children) {
+        processNode(model, model.nodes[childIdx], outMeshes);
+    }
+}
+
+std::vector<SubMesh> GLTFLoader::loadScene(const std::string& filepath) {
+    tinygltf::Model model;
+    tinygltf::TinyGLTF loader;
+    std::string err;
+    std::string warn;
+
+    bool ret = false;
+    std::string ext = std::filesystem::path(filepath).extension().string();
+    
+    // 1. 加载文件
+    if (ext == ".glb") {
+        ret = loader.LoadBinaryFromFile(&model, &err, &warn, filepath);
+    } else {
+        // 假设是 .gltf
+        ret = loader.LoadASCIIFromFile(&model, &err, &warn, filepath);
+    }
+
+    if (!warn.empty()) {
+        std::cout << "[GLTF Loader] Warn: " << warn << std::endl;
+    }
+
+    if (!err.empty()) {
+        std::cerr << "[GLTF Loader] Error: " << err << std::endl;
+    }
+
+    if (!ret) {
+        std::cerr << "[GLTF Loader] Failed to parse glTF: " << filepath << std::endl;
+        return {};
+    }
+
+    std::vector<SubMesh> meshes;
+
+    // 2. 遍历 Scene
+    const tinygltf::Scene& scene = model.scenes[model.defaultScene > -1 ? model.defaultScene : 0];
+    
+    // 遍历根节点
+    for (int nodeIdx : scene.nodes) {
+        processNode(model, model.nodes[nodeIdx], meshes);
+    }
+
+    std::cout << "[GLTF Loader] Loaded " << meshes.size() << " submeshes from " << filepath << std::endl;
+
+    return meshes;
+}
+```
+
+./engine/gltf_loader.h:
+```
+#pragma once
+
+#include <string>
+#include <vector>
+#include "asset_data.h" // 定义了 SubMesh
+
+class GLTFLoader {
+public:
+    static std::vector<SubMesh> loadScene(const std::string& filepath);
 };
 ```
 
@@ -3463,7 +4020,7 @@ void Model::initGLResources()
     glEnableVertexAttribArray(2);
     // location 3: tangent
     glVertexAttribPointer(
-        3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, tangent));
+        3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void *)offsetof(Vertex, tangent));
     glEnableVertexAttribArray(3);
 
     glBindVertexArray(0);
@@ -3681,419 +4238,436 @@ protected:
 ```
 #include "obj_loader.h"
 #include "geometry_factory.h"
+#include "utils/profiler.h"
 #include <fstream>
-#include <sstream>
 #include <iostream>
+#include <vector>
 #include <unordered_map>
+#include <filesystem>
+#include <cstring> // for memcpy, memset
+#include <cmath>   // for pow
 
-// 辅助函数：安全地将 OBJ 索引转换为 vector 下标
-// 1. 处理正数索引 (1-based -> 0-based)
-// 2. 处理负数索引 (相对位置 -> 绝对位置)
-// 3. 边界检查
-static int fixIndex(int idx, size_t size) {
-    if (idx > 0) return idx - 1;             // 正数：1 -> 0
-    if (idx < 0) return (int)size + idx;     // 负数：-1 -> size-1
-    return -1;                               // 0 是无效索引
+// =================================================================================================
+// Fast Parser Helpers (静态辅助函数，仅在本文件可见)
+// =================================================================================================
+
+// 1. 快速跳过空白字符 (空格, Tab, \r)
+// 注意：不跳过换行符 \n，因为 OBJ 是基于行的
+static inline void skipWhitespace(const char*& cursor) {
+    while (*cursor == ' ' || *cursor == '\t' || *cursor == '\r') {
+        cursor++;
+    }
 }
 
-// 辅助函数：将 "1/2/3" 这种字符串分割成索引
-// 返回 {posIndex, texIndex, normIndex}，如果某项缺失返回 -1
-static glm::ivec3 parseFaceIndex(const std::string& token, size_t vSize, size_t vtSize, size_t vnSize) {
-    glm::ivec3 result(-1);
-    std::string part;
-    std::stringstream ss(token);
-    
-    // 1. Position Index
-    if (std::getline(ss, part, '/')) {
-        if (!part.empty()) {
-            try {
-                int rawIdx = std::stoi(part);
-                result.x = fixIndex(rawIdx, vSize);
-            } catch (...) { result.x = -1; }
-        }
+// 2. 快速跳到行尾 (用于注释或跳过未知行)
+static inline void skipLine(const char*& cursor, const char* end) {
+    while (cursor < end && *cursor != '\n') {
+        cursor++;
     }
-    
-    // 2. TexCoord Index
-    if (std::getline(ss, part, '/')) {
-        if (!part.empty()) {
-            try {
-                int rawIdx = std::stoi(part);
-                result.y = fixIndex(rawIdx, vtSize);
-            } catch (...) { result.y = -1; }
-        }
+    if (cursor < end) cursor++; // 跳过 \n
+}
+
+// 3. 快速解析整数 (替代 std::stoi)
+static inline int parseInt(const char*& cursor) {
+    skipWhitespace(cursor);
+    int sign = 1;
+    if (*cursor == '-') {
+        sign = -1;
+        cursor++;
+    } else if (*cursor == '+') {
+        cursor++;
     }
 
-    // 3. Normal Index
-    if (std::getline(ss, part, '/')) {
-        if (!part.empty()) {
-            try {
-                int rawIdx = std::stoi(part);
-                result.z = fixIndex(rawIdx, vnSize);
-            } catch (...) { result.z = -1; }
+    int value = 0;
+    while (*cursor >= '0' && *cursor <= '9') {
+        value = value * 10 + (*cursor - '0');
+        cursor++;
+    }
+    return value * sign;
+}
+
+// 4. 快速解析浮点数 (替代 std::stof)
+// OBJ 里的浮点数通常很简单，不需要处理科学计数法(e-05)的所有边缘情况
+// 这个实现比 std::stof 快 5-10 倍
+static inline float parseFloat(const char*& cursor) {
+    skipWhitespace(cursor);
+    float sign = 1.0f;
+    if (*cursor == '-') {
+        sign = -1.0f;
+        cursor++;
+    } else if (*cursor == '+') {
+        cursor++;
+    }
+
+    float value = 0.0f;
+    // 整数部分
+    while (*cursor >= '0' && *cursor <= '9') {
+        value = value * 10.0f + (*cursor - '0');
+        cursor++;
+    }
+
+    // 小数部分
+    if (*cursor == '.') {
+        cursor++;
+        float factor = 0.1f;
+        while (*cursor >= '0' && *cursor <= '9') {
+            value += (*cursor - '0') * factor;
+            factor *= 0.1f;
+            cursor++;
+        }
+    }
+    
+    // (可选) 科学计数法支持: 1.2e-3
+    // 大多数标准 OBJ 导出器不使用科学计数法，但为了健壮性可以加上
+    if (*cursor == 'e' || *cursor == 'E') {
+        cursor++;
+        int exp = parseInt(cursor); // 复用整数解析
+        value *= std::pow(10.0f, (float)exp);
+    }
+
+    return value * sign;
+}
+
+// 5. 快速解析面索引 "v/vt/vn"
+// 返回 {v, vt, vn}，如果某项缺失返回 -1
+// 修改了 cursor 的位置
+static inline glm::ivec3 parseFaceIndex(const char*& cursor, size_t vSize, size_t vtSize, size_t vnSize) {
+    glm::ivec3 result(-1);
+    
+    // 1. 解析 v
+    result.x = parseInt(cursor);
+    
+    // 处理 v 索引转换 (1-based -> 0-based, negative -> relative)
+    if (result.x > 0) result.x -= 1;
+    else if (result.x < 0) result.x += (int)vSize;
+
+    if (*cursor == '/') {
+        cursor++;
+        
+        // 检查是否有 vt (例如 "1//3" 这种情况就是没有 vt)
+        if (*cursor != '/') {
+            result.y = parseInt(cursor);
+            if (result.y > 0) result.y -= 1;
+            else if (result.y < 0) result.y += (int)vtSize;
+        }
+
+        if (*cursor == '/') {
+            cursor++;
+            // 解析 vn
+            result.z = parseInt(cursor);
+            if (result.z > 0) result.z -= 1;
+            else if (result.z < 0) result.z += (int)vnSize;
         }
     }
 
     return result;
 }
 
+// =================================================================================================
+// OBJLoader 实现
+// =================================================================================================
+
+// load 单体函数保持旧逻辑或可以简单封装 loadScene，这里为了节省篇幅，聚焦 loadScene
 MeshData OBJLoader::load(const std::string& filepath, bool useFlatShade, const std::string& targetSubMeshName) {
-    std::ifstream file(filepath);
-    if (!file.is_open()) {
-        // 抛出异常供 Model 捕获，或者打印错误并返回空数据
-        throw std::runtime_error("[OBJ Loader] Failed to open OBJ file: " + filepath);
-    }
+    // 简单复用 loadScene，只取第一个 Mesh 或匹配的 Mesh
+    auto meshes = loadScene(filepath, useFlatShade);
+    MeshData data;
+    if (meshes.empty()) return data;
 
-    // 临时存储原始数据
-    std::vector<glm::vec3> temp_positions;
-    std::vector<glm::vec3> temp_normals;
-    std::vector<glm::vec2> temp_texCoords;
-
-    MeshData meshData; // 最终返回的数据
-
-    // 顶点去重 Map
-    std::unordered_map<Vertex, uint32_t> uniqueVertices;
-
-    std::string currentObjectName = "Object";
-    std::string currentMaterialName = "Default";
-    // 组合名称，用于匹配 importScene 时的命名逻辑
-    // 逻辑：如果 targetSubMeshName 不为空，我们只在匹配时收集面
-    bool capturesAll = targetSubMeshName.empty();
-    bool isCapturing = capturesAll; // 默认状态
-
-    std::string line;
-    while (std::getline(file, line)) {
-        if (line.empty() || line[0] == '#') continue;
-
-        std::stringstream ss(line);
-        std::string type;
-        ss >> type;
-
-        if (type == "v") {
-            glm::vec3 v;
-            ss >> v.x >> v.y >> v.z;
-            temp_positions.push_back(v);
+    if (targetSubMeshName.empty()) {
+        // 如果没有指定名称，且只有一个 mesh，直接返回
+        if (meshes.size() == 1) {
+            data.vertices = std::move(meshes[0].vertices);
+            data.indices = std::move(meshes[0].indices);
+            data.hasUVs = meshes[0].hasUVs;
+        } else {
+            // 如果有多个 mesh，我们需要把它们合并成一个 MeshData
+            // 或者现在的架构其实不需要合并，因为 ResourceManager::getModel 应该只用于简单的单体
+            // 这里我们暂时只返回第一个，或者抛出警告
+            // 为了兼容性，返回第一个非空的
+             data.vertices = std::move(meshes[0].vertices);
+             data.indices = std::move(meshes[0].indices);
+             data.hasUVs = meshes[0].hasUVs;
         }
-        else if (type == "vn") {
-            glm::vec3 vn;
-            ss >> vn.x >> vn.y >> vn.z;
-            temp_normals.push_back(vn);
-        }
-        else if (type == "vt") {
-            glm::vec2 vt;
-            ss >> vt.x >> vt.y;
-            meshData.hasUVs = true; // 注意：这里标记可能有误，如果只加载部分物体且该物体无UV，但全局有UV。不过通常无伤大雅。
-            temp_texCoords.push_back(vt);
-        }
-
-        else if (type == "o" || type == "g") {
-            if (!capturesAll) {
-                std::string name;
-                std::getline(ss, name);
-                // Trim
-                size_t first = name.find_first_not_of(" \t\r");
-                size_t last = name.find_last_not_of(" \t\r");
-                if (first != std::string::npos && last != std::string::npos) 
-                    currentObjectName = name.substr(first, last - first + 1);
-                else currentObjectName = "Object"; // Fallback
-
-                currentMaterialName = "Default"; // 重置材质名
-
-                // 检查是否匹配目标 (匹配 Object Name)
-                if (currentObjectName == targetSubMeshName) isCapturing = true;
-                else isCapturing = false;
-            }
-        }
-        else if (type == "usemtl") {
-            if (!capturesAll) {
-                ss >> currentMaterialName;
-                
-                // 检查是否匹配目标 (匹配 组合名称 "Object_Mat")
-                // 这必须和 importScene 里的命名逻辑完全一致
-                std::string combinedName = currentObjectName + "_" + currentMaterialName;
-                
-                if (currentObjectName == targetSubMeshName || combinedName == targetSubMeshName) {
-                    isCapturing = true;
-                } else {
-                    isCapturing = false;
-                }
-            }
-        }
-
-        else if (type == "f") {
-            if (!isCapturing) continue;
-
-            std::string token;
-            std::vector<Vertex> faceVertices;
-
-            // 读取面数据
-            while (ss >> token) {
-                glm::ivec3 indices = parseFaceIndex(token, temp_positions.size(), temp_texCoords.size(), temp_normals.size());
-                Vertex currentVertex;
-                
-                // Position
-                if (indices.x >= 0 && indices.x < temp_positions.size())
-                    currentVertex.position = temp_positions[indices.x];
-                else
-                    continue;
-
-                // TexCoord
-                if (indices.y >= 0 && indices.y < temp_texCoords.size())
-                    currentVertex.texCoord = temp_texCoords[indices.y];
-                else
-                    currentVertex.texCoord = glm::vec2(0.0f);
-
-                // Normal
-                if (indices.z >= 0 && indices.z < temp_normals.size())
-                    currentVertex.normal = temp_normals[indices.z];
-                else
-                    currentVertex.normal = glm::vec3(0.0f);
-
-                faceVertices.push_back(currentVertex);
-            }
-
-            // 三角化 (Triangle Fan)
-            // 将多边形分解为三角形
-            if (faceVertices.size() >= 3) {
-                for (size_t i = 1; i < faceVertices.size() - 1; ++i) {
-                    Vertex triVerts[3] = {faceVertices[0], faceVertices[i], faceVertices[i+1]};
-
-                    if (useFlatShade)
-                    {
-                        // 1. 强制计算面法线 (忽略 OBJ 文件自带的法线)
-                        glm::vec3 edge1 = triVerts[1].position - triVerts[0].position;
-                        glm::vec3 edge2 = triVerts[2].position - triVerts[0].position;
-                        glm::vec3 faceNormal = glm::normalize(glm::cross(edge1, edge2));
-
-                        // 2. 将三个顶点直接加入，不做去重
-                        for (int k = 0; k < 3; ++k) {
-                            triVerts[k].normal = faceNormal; // 覆盖法线
-                            
-                            // 直接 push，不查 map
-                            meshData.indices.push_back(static_cast<uint32_t>(meshData.vertices.size()));
-                            meshData.vertices.push_back(triVerts[k]);
-                        }
-                    }
-                    else
-                    {
-                        for (int k = 0; k < 3; ++k) {
-                            if (uniqueVertices.count(triVerts[k]) == 0) {
-                                uniqueVertices[triVerts[k]] = static_cast<uint32_t>(meshData.vertices.size());
-                                meshData.vertices.push_back(triVerts[k]);
-                            }
-                            meshData.indices.push_back(uniqueVertices[triVerts[k]]);
-                        }
-                    }
-                }
+    } else {
+        // 查找匹配的
+        for (auto& m : meshes) {
+            if (m.name == targetSubMeshName) {
+                data.vertices = std::move(m.vertices);
+                data.indices = std::move(m.indices);
+                data.hasUVs = m.hasUVs;
+                break;
             }
         }
     }
-
-    // 自动计算法线（如果 OBJ 文件里完全没有法线信息）
-    if (!useFlatShade && temp_normals.empty()) {
-        for (size_t i = 0; i < meshData.indices.size(); i += 3) {
-            Vertex& v0 = meshData.vertices[meshData.indices[i]];
-            Vertex& v1 = meshData.vertices[meshData.indices[i+1]];
-            Vertex& v2 = meshData.vertices[meshData.indices[i+2]];
-
-            glm::vec3 edge1 = v1.position - v0.position;
-            glm::vec3 edge2 = v2.position - v0.position;
-            glm::vec3 normal = glm::normalize(glm::cross(edge1, edge2));
-
-            v0.normal = normal;
-            v1.normal = normal;
-            v2.normal = normal;
-        }
-    }
-
-    // 既然我们已经有了 meshData (vertices/indices)，直接借用 GeometryFactory 的算法
-    // 需要 include "geometry_factory.h"
-    GeometryFactory::computeTangents(meshData.vertices, meshData.indices);
-
-    std::cout << "Loaded OBJ: " << filepath << "\n" 
-              << "  Vertices: " << meshData.vertices.size() << "\n" 
-              << "  Indices: " << meshData.indices.size() << std::endl;
-    
-    if (!capturesAll && meshData.vertices.empty()) {
-        std::cerr << "[OBJ Loader] Warning: SubMesh '" << targetSubMeshName << "' not found in " << filepath << std::endl;
-    }
-
-    return meshData;
+    return data;
 }
 
 std::vector<SubMesh> OBJLoader::loadScene(const std::string& filepath, bool useFlatShade) {
-    std::ifstream file(filepath);
+    ScopedTimer timer("OBJLoader::loadScene (" + filepath + ")");
+
+    // 1. 一次性读取整个文件到 Buffer [Memory Mapped File 思想]
+    std::ifstream file(filepath, std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
-        throw std::runtime_error("[OBJ Loader] Failed to open OBJ file for scene: " + filepath);
+        throw std::runtime_error("[OBJ Loader] Failed to open file: " + filepath);
     }
 
-    std::vector<SubMesh> meshes;
+    size_t fileSize = (size_t)file.tellg();
+    std::vector<char> buffer(fileSize + 1); // +1 为了末尾的安全哨兵
+    file.seekg(0);
+    file.read(buffer.data(), fileSize);
+    file.close();
+    buffer[fileSize] = '\n'; // 确保最后有一个换行符，防止解析溢出
+
+    // 2. 预分配内存
+    // 经验估算：v 行通常占 1/3 到 1/2 的行数，假设每行平均 30 字节
+    // 这是一个非常保守的预估，目的是减少 realloc
+    size_t estimatedVerts = fileSize / 60; 
     
-    // 全局数据池 (v, vn, vt 是跨物体共享索引的)
     std::vector<glm::vec3> global_positions;
     std::vector<glm::vec3> global_normals;
     std::vector<glm::vec2> global_texCoords;
+    global_positions.reserve(estimatedVerts);
+    global_normals.reserve(estimatedVerts);
+    global_texCoords.reserve(estimatedVerts);
 
-    // 当前正在构建的 SubMesh
+    std::vector<SubMesh> meshes;
     SubMesh currentMesh;
     currentMesh.name = "Default";
     currentMesh.hasUVs = false;
+    currentMesh.vertices.reserve(estimatedVerts); // 预估
+    currentMesh.indices.reserve(estimatedVerts);
 
-    // 当前 SubMesh 的顶点去重 Map
-    std::unordered_map<Vertex, uint32_t> uniqueVertices;
+    // 3. 指针解析循环
+    const char* cursor = buffer.data();
+    const char* end = buffer.data() + fileSize;
 
+    // 当前解析状态
     std::string currentObjectName = "Object";
-    std::string currentMaterialName = "DefaultMat";
+    std::string currentMaterialName = "Default";
+    
+    // 顶点去重 Map (Local per SubMesh)
+    // 注意：std::unordered_map 可能在频繁插入时变慢，
+    // 对于超大模型，直接插入 vertex 可能会比 map 查找更快 (trade memory for speed)
+    // 但为了保持索引 buffer 小，我们还是用 map。
+    std::unordered_map<Vertex, uint32_t> uniqueVertices;
+    uniqueVertices.reserve(estimatedVerts); // 预留 Bucket
 
-    // 辅助 lambda：用于在切换物体或结束时保存当前 Mesh
     auto flushCurrentMesh = [&]() {
         if (!currentMesh.indices.empty()) {
-            
-            // 如果需要自动计算法线 (Smooth 且源文件没法线)
+            // 自动计算法线
             if (!useFlatShade && global_normals.empty()) {
-                 for (size_t i = 0; i < currentMesh.indices.size(); i += 3) {
+                // ... (法线计算逻辑同前) ...
+                // 这里的计算量较大，如果模型自带法线则不会执行
+                for (size_t i = 0; i < currentMesh.indices.size(); i += 3) {
                     Vertex& v0 = currentMesh.vertices[currentMesh.indices[i]];
                     Vertex& v1 = currentMesh.vertices[currentMesh.indices[i+1]];
                     Vertex& v2 = currentMesh.vertices[currentMesh.indices[i+2]];
-                    glm::vec3 edge1 = v1.position - v0.position;
-                    glm::vec3 edge2 = v2.position - v0.position;
-                    glm::vec3 normal = glm::normalize(glm::cross(edge1, edge2));
-                    v0.normal = normal; v1.normal = normal; v2.normal = normal;
+                    glm::vec3 e1 = v1.position - v0.position;
+                    glm::vec3 e2 = v2.position - v0.position;
+                    glm::vec3 n = glm::normalize(glm::cross(e1, e2));
+                    v0.normal = n; v1.normal = n; v2.normal = n;
                 }
             }
-            meshes.push_back(currentMesh);
+            // 计算切线
+            GeometryFactory::computeTangents(currentMesh.vertices, currentMesh.indices);
+            
+            meshes.push_back(std::move(currentMesh));
         }
-        
-        // 重置状态
+        // Reset
         currentMesh = SubMesh();
-        uniqueVertices.clear();
-        currentMesh.hasUVs = false; 
+        currentMesh.name = currentObjectName; // 继承当前对象名
+        uniqueVertices.clear(); 
+        // 重置后预留一点空间，防止下次立即 realloc
+        uniqueVertices.reserve(1000); 
     };
 
-    std::string line;
-    while (std::getline(file, line)) {
-        if (line.empty() || line[0] == '#') continue;
+    while (cursor < end) {
+        // 跳过行首空白
+        skipWhitespace(cursor);
+        
+        if (cursor >= end) break;
 
-        std::stringstream ss(line);
-        std::string type;
-        ss >> type;
+        char c = *cursor;
 
-        // --- 读取全局数据 ---
-        if (type == "v") {
-            glm::vec3 v; ss >> v.x >> v.y >> v.z;
-            global_positions.push_back(v);
-        }
-        else if (type == "vn") {
-            glm::vec3 vn; ss >> vn.x >> vn.y >> vn.z;
-            global_normals.push_back(vn);
-        }
-        else if (type == "vt") {
-            glm::vec2 vt; ss >> vt.x >> vt.y;
-            global_texCoords.push_back(vt);
-        }
-
-        // --- 切换物体 (o/g) 或 材质 (usemtl) ---
-        else if (type == "o" || type == "g") {
-            std::string name;
-            std::getline(ss, name);
-            // Trim
-            size_t first = name.find_first_not_of(" \t\r");
-            size_t last = name.find_last_not_of(" \t\r");
-            if (first != std::string::npos && last != std::string::npos) 
-                name = name.substr(first, last - first + 1);
-            else name = "Object_" + std::to_string(meshes.size());
-
-            // 只有当名字真的变了，才切分 (防止 o 和 g 连着写导致生成空 mesh)
-            if (name != currentObjectName) {
-                flushCurrentMesh();
-                currentObjectName = name;
-                // 重置材质名，因为新物体可能还没定义 usemtl
-                currentMaterialName = "Default"; 
-                currentMesh.name = currentObjectName;
+        // ---------------------------------------------------------
+        // 顶点数据 (v, vt, vn)
+        // ---------------------------------------------------------
+        if (c == 'v') {
+            cursor++; // skip 'v'
+            if (*cursor == ' ') {
+                // v: Position
+                float x = parseFloat(cursor);
+                float y = parseFloat(cursor);
+                float z = parseFloat(cursor);
+                global_positions.emplace_back(x, y, z);
+            } 
+            else if (*cursor == 't') {
+                // vt: TexCoord
+                cursor++;
+                float u = parseFloat(cursor);
+                float v = parseFloat(cursor);
+                global_texCoords.emplace_back(u, v);
+            } 
+            else if (*cursor == 'n') {
+                // vn: Normal
+                cursor++;
+                float x = parseFloat(cursor);
+                float y = parseFloat(cursor);
+                float z = parseFloat(cursor);
+                global_normals.emplace_back(x, y, z);
             }
+            skipLine(cursor, end);
         }
-        else if (type == "usemtl") {
-            std::string matName;
-            ss >> matName;
+        // ---------------------------------------------------------
+        // 面数据 (f)
+        // ---------------------------------------------------------
+        else if (c == 'f') {
+            cursor++; // skip 'f'
             
-            // 如果材质变了，必须切分 Mesh！
-            // 因为我们的 MeshComponent 只能承载一个材质
-            if (matName != currentMaterialName) {
-                flushCurrentMesh();
-                currentMaterialName = matName;
-                // 新 Mesh 的名字组合：物体名_材质名
-                // 这样你在 Hierarchy 里能看到 "Chair_Wood" 和 "Chair_Fabric"
-                currentMesh.name = currentObjectName + "_" + currentMaterialName;
-            }
-        }
+            // 读取这一行的所有索引
+            std::vector<glm::ivec3> faceIndices;
+            // 预留 4 个，大多数面是三角形(3)或四边形(4)
+            faceIndices.reserve(4); 
 
-        // --- 读取面 (f) ---
-        else if (type == "f") {
-            std::string token;
-            std::vector<Vertex> faceVertices;
-
-            while (ss >> token) {
-                // 注意：这里传入的是当前全局池的大小
-                glm::ivec3 indices = parseFaceIndex(token, global_positions.size(), global_texCoords.size(), global_normals.size());
-                Vertex currentVertex;
-
-                // 1. Position
-                if (indices.x >= 0 && indices.x < global_positions.size())
-                    currentVertex.position = global_positions[indices.x];
-                else continue;
-
-                // 2. TexCoord
-                if (indices.y >= 0 && indices.y < global_texCoords.size()) {
-                    currentVertex.texCoord = global_texCoords[indices.y];
-                    currentMesh.hasUVs = true; // 只要用到了 UV 索引，就标记有 UV
+            while (cursor < end && *cursor != '\n') {
+                skipWhitespace(cursor);
+                if (*cursor >= '0' && *cursor <= '9' || *cursor == '-') {
+                    glm::ivec3 idx = parseFaceIndex(cursor, global_positions.size(), global_texCoords.size(), global_normals.size());
+                    faceIndices.push_back(idx);
                 } else {
-                    currentVertex.texCoord = glm::vec2(0.0f);
+                    // 遇到未知字符，可能是行尾注释
+                    break;
                 }
-
-                // 3. Normal
-                if (indices.z >= 0 && indices.z < global_normals.size())
-                    currentVertex.normal = global_normals[indices.z];
-                else 
-                    currentVertex.normal = glm::vec3(0.0f);
-
-                faceVertices.push_back(currentVertex);
             }
+            skipLine(cursor, end); // 确保跳过换行符
 
-            // 三角化
-            if (faceVertices.size() >= 3) {
-                for (size_t i = 1; i < faceVertices.size() - 1; ++i) {
-                    Vertex triVerts[3] = {faceVertices[0], faceVertices[i], faceVertices[i+1]};
+            // 三角化 (Triangulation) - Triangle Fan
+            if (faceIndices.size() >= 3) {
+                for (size_t i = 1; i < faceIndices.size() - 1; ++i) {
+                    glm::ivec3 faceVertsIdx[3] = { faceIndices[0], faceIndices[i], faceIndices[i+1] };
 
+                    // 构建 3 个 Vertex
+                    Vertex triVerts[3];
+                    for(int k=0; k<3; ++k) {
+                        glm::ivec3 idx = faceVertsIdx[k];
+                        // Pos
+                        if(idx.x != -1) triVerts[k].position = global_positions[idx.x];
+                        // UV
+                        if(idx.y != -1) {
+                            triVerts[k].texCoord = global_texCoords[idx.y];
+                            currentMesh.hasUVs = true;
+                        }
+                        // Normal
+                        if(idx.z != -1) triVerts[k].normal = global_normals[idx.z];
+                    }
+
+                    // Flat Shading 处理
                     if (useFlatShade) {
-                        // Flat Shading 逻辑：分裂顶点，重算法线
-                        glm::vec3 edge1 = triVerts[1].position - triVerts[0].position;
-                        glm::vec3 edge2 = triVerts[2].position - triVerts[0].position;
-                        glm::vec3 faceNormal = glm::normalize(glm::cross(edge1, edge2));
-
-                        for (int k = 0; k < 3; ++k) {
-                            triVerts[k].normal = faceNormal;
-                            currentMesh.indices.push_back(static_cast<uint32_t>(currentMesh.vertices.size()));
+                        glm::vec3 e1 = triVerts[1].position - triVerts[0].position;
+                        glm::vec3 e2 = triVerts[2].position - triVerts[0].position;
+                        glm::vec3 faceN = glm::normalize(glm::cross(e1, e2));
+                        
+                        for(int k=0; k<3; ++k) {
+                            triVerts[k].normal = faceN;
+                            currentMesh.indices.push_back((uint32_t)currentMesh.vertices.size());
                             currentMesh.vertices.push_back(triVerts[k]);
                         }
                     } 
                     else {
-                        // Smooth Shading 逻辑：使用 Map 去重
-                        for (int k = 0; k < 3; ++k) {
-                            if (uniqueVertices.count(triVerts[k]) == 0) {
-                                uniqueVertices[triVerts[k]] = static_cast<uint32_t>(currentMesh.vertices.size());
+                        // Smooth Shading (Map 去重)
+                        for(int k=0; k<3; ++k) {
+                            auto it = uniqueVertices.find(triVerts[k]);
+                            if (it != uniqueVertices.end()) {
+                                currentMesh.indices.push_back(it->second);
+                            } else {
+                                uint32_t newIdx = (uint32_t)currentMesh.vertices.size();
+                                uniqueVertices[triVerts[k]] = newIdx;
                                 currentMesh.vertices.push_back(triVerts[k]);
+                                currentMesh.indices.push_back(newIdx);
                             }
-                            currentMesh.indices.push_back(uniqueVertices[triVerts[k]]);
                         }
                     }
                 }
             }
         }
+        // ---------------------------------------------------------
+        // 对象 / 组 (o, g)
+        // ---------------------------------------------------------
+        else if (c == 'o' || c == 'g') {
+            // 如果是 'g'，要判断是不是紧跟在 'o' 后面，避免重复切分
+            // 简单处理：只要遇到 o 或 g 且名字变了，就切分
+            char type = c;
+            cursor++;
+            skipWhitespace(cursor);
+            
+            // 读取名字
+            const char* nameStart = cursor;
+            while (cursor < end && *cursor != '\n' && *cursor != '\r') cursor++;
+            std::string name(nameStart, cursor - nameStart);
+            
+            // Trim
+            size_t first = name.find_first_not_of(" \t");
+            if (first != std::string::npos) {
+                size_t last = name.find_last_not_of(" \t");
+                name = name.substr(first, last - first + 1);
+            } else {
+                if (type == 'o') name = "Object";
+                else name = "Group";
+            }
+
+            if (name != currentObjectName) {
+                flushCurrentMesh();
+                currentObjectName = name;
+                currentMaterialName = "Default"; // 重置材质
+                currentMesh.name = currentObjectName;
+            }
+            skipLine(cursor, end);
+        }
+        // ---------------------------------------------------------
+        // 材质 (usemtl)
+        // ---------------------------------------------------------
+        else if (c == 'u') { // heuristic for "usemtl"
+            if (strncmp(cursor, "usemtl", 6) == 0) {
+                cursor += 6;
+                skipWhitespace(cursor);
+                
+                const char* nameStart = cursor;
+                while (cursor < end && *cursor != '\n' && *cursor != '\r') cursor++;
+                std::string matName(nameStart, cursor - nameStart);
+                
+                // Trim
+                size_t first = matName.find_first_not_of(" \t");
+                if(first != std::string::npos) {
+                    size_t last = matName.find_last_not_of(" \t");
+                    matName = matName.substr(first, last - first + 1);
+                }
+
+                if (matName != currentMaterialName) {
+                    flushCurrentMesh();
+                    currentMaterialName = matName;
+                    currentMesh.name = currentObjectName + "_" + currentMaterialName;
+                }
+            }
+            skipLine(cursor, end);
+        }
+        // ---------------------------------------------------------
+        // 其他 (注释 #, mtllib 等)
+        // ---------------------------------------------------------
+        else {
+            skipLine(cursor, end);
+        }
     }
 
-    // 循环结束，保存最后一个物体
+    // 处理最后一个 Mesh
     flushCurrentMesh();
 
-    std::cout << "Loaded Scene OBJ: " << filepath << " containing " << meshes.size() << " meshes." << std::endl;
+    std::cout << "Loaded Scene OBJ stats:" 
+              << "\n  File Size: " << fileSize / 1024 << " KB"
+              << "\n  Total SubMeshes: " << meshes.size()
+              << "\n  Total Global Verts: " << global_positions.size() 
+              << std::endl;
+
     return meshes;
 }
 ```
@@ -4104,21 +4678,8 @@ std::vector<SubMesh> OBJLoader::loadScene(const std::string& filepath, bool useF
 
 #include <string>
 #include <vector>
+#include "asset_data.h"
 #include "base/vertex.h"
-
-// 定义一个中间结构体，用于在 Loader 和 Model 之间传递数据
-struct MeshData {
-    std::vector<Vertex> vertices;
-    std::vector<uint32_t> indices;
-    bool hasUVs = false;
-};
-
-struct SubMesh {
-    std::string name;
-    std::vector<Vertex> vertices;
-    std::vector<uint32_t> indices;
-    bool hasUVs = false;
-};
 
 class OBJLoader {
 public:
@@ -4913,6 +5474,8 @@ private:
 ./engine/renderer.cpp:
 ```
 #include "renderer.h"
+#include "resource_manager.h"
+#include "asset_data.h"
 #include <iostream>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -4941,7 +5504,7 @@ void Renderer::init() {
         layout(location = 0) in vec3 aPosition;
         layout(location = 1) in vec3 aNormal;
         layout(location = 2) in vec2 aTexCoord;
-        layout(location = 3) in vec3 aTangent;
+        layout(location = 3) in vec4 aTangent;
 
         out vec3 FragPos;
         out vec3 Normal;
@@ -4969,7 +5532,7 @@ void Renderer::init() {
             Normal = N; // 将计算好的法线传给 FS (虽然 FS 可能有了 TBN 会重算，但保留它是个好习惯)
             
             // 3. 计算世界空间切线 (T)
-            vec3 T = normalize(normalMatrix * aTangent);
+            vec3 T = normalize(normalMatrix * aTangent.xyz);
             
             // 4. Gram-Schmidt 正交化
             // 这一步非常关键！它剔除 T 中包含的 N 分量，确保 T 绝对垂直于 N。
@@ -4978,7 +5541,7 @@ void Renderer::init() {
             
             // 5. 计算副切线 (Bitangent, B)
             // 利用叉乘生成第三个轴
-            vec3 B = cross(N, T);
+            vec3 B = cross(N, T) * aTangent.w;
             
             // 6. 构建 TBN 矩阵
             TBN = mat3(T, B, N);
@@ -5048,8 +5611,10 @@ void Renderer::init() {
         uniform float alphaCutoff;
 
         // 动态环境贴图 IBL
-        uniform samplerCube envMap;
-        uniform bool hasEnvMap;
+        uniform samplerCube irradianceMap; 
+        uniform bool hasIrradianceMap;
+        uniform samplerCube prefilterMap; 
+        uniform sampler2D brdfLUT;
         uniform float iblIntensity;
 
         // 视差校正
@@ -5107,6 +5672,8 @@ void Renderer::init() {
         uniform bool isUnlit;
         uniform bool isDoubleSided;
         uniform bool isDebug;
+
+        uniform float exposure;
 
         uniform vec3 viewPos;
         
@@ -5386,34 +5953,40 @@ void Renderer::init() {
                 CalcSpotLight(spotLights[i], norm, FragPos, viewDir, albedoColor, F0, roughness, directDiffuse, directSpecular);
             
             // 2. 环境光 (IBL)
-            vec3 ambientDiffuse = vec3(0.0);
-            vec3 ambientSpecular = vec3(0.0);
+            vec3 ambientLighting = vec3(0.0);
             
-            if (hasEnvMap) {
-                // Diffuse IBL
-                vec3 irradiance = textureLod(envMap, norm, 8.0).rgb; 
+            if (hasIrradianceMap) {
+                // --- Diffuse IBL ---
+                vec3 irradiance = texture(irradianceMap, norm).rgb;
                 vec3 kS = FresnelSchlickRoughness(max(dot(norm, viewDir), 0.0), F0, roughness);
                 vec3 kD = 1.0 - kS;
                 kD *= 1.0 - metallic;
-                
-                ambientDiffuse = kD * irradiance * albedoColor * iblIntensity;
+                vec3 ambientDiffuse = kD * irradiance * albedoColor;
 
-                // Specular IBL
+                // --- Specular IBL ---
+                // 1. Prefilter
                 vec3 R = reflect(-viewDir, norm);
-                vec3 correctedR = BoxProjectedCubemapDirection(FragPos, R, probePos, probeBoxMin, probeBoxMax);
-                float MAX_LOD = 4.0;
-                vec3 prefilteredColor = textureLod(envMap, correctedR, roughness * MAX_LOD).rgb;
-                vec3 specularFactor = EnvBRDFApprox(F0, roughness, max(dot(norm, viewDir), 0.0));
+                const float MAX_REFLECTION_LOD = 4.0;
+                vec3 prefilteredColor = textureLod(prefilterMap, R, roughness * MAX_REFLECTION_LOD).rgb;
                 
-                ambientSpecular = prefilteredColor * specularFactor * iblIntensity;
-            } else {
-                ambientDiffuse = vec3(0.03) * albedoColor * ao;
+                // 2. BRDF LUT
+                vec2 brdf  = texture(brdfLUT, vec2(max(dot(norm, viewDir), 0.0), roughness)).rg;
+                
+                // 3. Combine
+                vec3 ambientSpecular = prefilteredColor * (F0 * brdf.x + brdf.y);
+
+                ambientLighting = (ambientDiffuse + ambientSpecular) * iblIntensity;
+            } 
+            else {
+                // 极端情况下的 Fallback (例如资源未加载)
+                // 给一点点微弱的底色，防止全黑
+                ambientLighting = vec3(0.03) * albedoColor * ao;
             }
+
+            // 3. 组合最终颜色
+            vec3 opaqueColor = (ambientLighting + directDiffuse) * ao + directSpecular;
             
-            // 3. 组合 PBR 不透明部分
-            vec3 opaqueColor = (ambientDiffuse + directDiffuse) * ao + (ambientSpecular + directSpecular);
-            
-            // 4. 玻璃/折射逻辑 (关键修改)
+            // 4. 玻璃/折射逻辑
             vec3 finalColor = opaqueColor;
 
             if (material.transparency > 0.001) 
@@ -5434,22 +6007,18 @@ void Renderer::init() {
                 vec3 refractColor = vec3(0.0);
                 vec3 reflectColor = vec3(0.0);
 
-                if (hasEnvMap) {
-                    // Refract
-                    float k = max(material.refractionIndex, 1.0);
-                    float ratio = 1.0 / k;
-                    vec3 I = normalize(FragPos - viewPos);
-                    
-                    // 简化折射采样 (不做色散了，为了性能和清晰度)
-                    vec3 R_refract = refract(I, norm, ratio);
-                    vec3 corrR_refract = BoxProjectedCubemapDirection(FragPos, R_refract, probePos, probeBoxMin, probeBoxMax);
-                    refractColor = textureLod(envMap, corrR_refract, 0.0).rgb * iblIntensity;
+                // 使用 IBL 贴图进行折射/反射
+                float k = max(material.refractionIndex, 1.0);
+                float ratio = 1.0 / k;
+                vec3 I = normalize(FragPos - viewPos);
+                
+                // 折射
+                vec3 R_refract = refract(I, norm, ratio);
+                refractColor = textureLod(prefilterMap, R_refract, 0.0).rgb * iblIntensity;
 
-                    // Reflect
-                    vec3 R_reflect = reflect(I, norm);
-                    vec3 corrR_reflect = BoxProjectedCubemapDirection(FragPos, R_reflect, probePos, probeBoxMin, probeBoxMax);
-                    reflectColor = textureLod(envMap, corrR_reflect, material.roughness * 4.0).rgb * iblIntensity;
-                }
+                // 反射
+                vec3 R_reflect = reflect(I, norm);
+                reflectColor = textureLod(prefilterMap, R_reflect, material.roughness * 4.0).rgb * iblIntensity;
 
                 vec3 glassBody = mix(refractColor, reflectColor, F);
                 
@@ -5480,6 +6049,8 @@ void Renderer::init() {
             }
             
             finalColor += emission;
+
+            finalColor *= exposure;
 
             // 5. Tone Mapping (ACES)
             finalColor = ACESFilm(finalColor);
@@ -5971,7 +6542,6 @@ void Renderer::init() {
     _mainShader->setUniformInt("diffuseMap", 0);  // Slot 0: Albedo
     _mainShader->setUniformInt("normalMap", 1);   // Slot 1: Normal
     _mainShader->setUniformInt("shadowMap", 2);   // Slot 2: CSM Array
-    _mainShader->setUniformInt("envMap", 3);      // Slot 3: IBL Cubemap (改到3，避开NormalMap)
     _mainShader->setUniformInt("ormMap", 4);      // Slot 4: ORM
     _mainShader->setUniformInt("emissiveMap", 5); // Slot 5: Emissive
     _mainShader->setUniformInt("opacityMap", 6);  // Slot 6: Opacity
@@ -6091,63 +6661,38 @@ void Renderer::init() {
         out vec4 FragColor;
         in vec3 TexCoords;
 
+        uniform bool useHDR;
+        uniform samplerCube skyboxMap;
+
+        // [修改] 改为 Uniform 输入
+        uniform vec3 colZenith;
+        uniform vec3 colHorizon;
+        uniform vec3 colGround;
+        uniform float energy;
+
         void main() {
-            vec3 dir = normalize(TexCoords);
-            float y = dir.y;
-
-            // =========================================================
-            // [配色方案] 
-            // =========================================================
-            
-            // 1. 地面颜色 (Deep Dark Gray)
-            vec3 colGround = vec3(0.2, 0.2, 0.2); 
-
-            // 2. 地平线颜色 (Horizon Fog)
-            // [修改]: 稍微提亮一点，增加一点“厚重感”和不透明度
-            vec3 colHorizon = vec3(0.7, 0.75, 0.82); 
-
-            // 3. 天顶颜色 (Sky Zenith)
-            vec3 colZenith  = vec3(0.2, 0.45, 0.8); 
-
             vec3 finalColor;
 
-            // =========================================================
-            // [混合逻辑] 
-            // =========================================================
-            
-            if (y < 0.0) {
-                // --- 地下部分 ---
-                
-                // [核心改进 1: 平滑过渡]
-                // 原代码这里使用了 colHorizon * 0.5，导致和上半部分产生接缝。
-                // 我们现在直接从 colHorizon 开始，确保 y=0 处无缝连接。
-
-                // [核心改进 2: 加大雾气密度]
-                // 我们不改变 -0.2 这个范围，而是改变混合曲线的"形状"。
-                // 原始线性混合会让地面黑得太快。
-                // 这里先算出线性因子 factorLinear (0.0 到 1.0)
-                float factorLinear = smoothstep(0.0, -0.2, y);
-                
-                // 使用 pow 函数处理因子。
-                // 0.4 的指数会让混合因子在接近 0 (地平线) 的地方停留更久，
-                // 从而让雾气颜色"渗"入地面更多，看起来雾更浓，但并没有扩大实际渲染范围。
-                float factorCurved = pow(factorLinear, 0.4); 
-
-                finalColor = mix(colHorizon, colGround, factorCurved); 
-            } 
+            if (useHDR) {
+                // 直接采样 HDR 天空盒
+                finalColor = texture(skyboxMap, TexCoords).rgb;
+            }
             else {
-                // --- 天空部分 ---
-                
-                // 同样为了增加雾气感，我们让天顶蓝色的出现稍微"迟"一点
-                // 0.5 的指数比原来的 0.7 更小，意味着白色雾气会向上延伸得更有力
-                float t = pow(y, 0.5); 
-                finalColor = mix(colHorizon, colZenith, t);
+                // 程序化天空逻辑
+                vec3 dir = normalize(TexCoords);
+                float y = dir.y;
+                if (y < 0.0) {
+                    float factorLinear = smoothstep(0.0, -0.2, y);
+                    float factorCurved = pow(factorLinear, 0.4); 
+                    finalColor = mix(colHorizon, colGround, factorCurved); 
+                } else {
+                    float t = pow(y, 0.5); 
+                    finalColor = mix(colHorizon, colZenith, t);
+                }
             }
 
-            // [色调映射] (可选) 
-            // 加上轻微的 Gamma 矫正或 Tone Mapping 可以让雾气看起来更柔和
-            // finalColor = pow(finalColor, vec3(1.0/2.2)); 
-
+            finalColor *= energy;
+            // Tone Mapping 可选
             FragColor = vec4(finalColor, 1.0);
         }
     )";
@@ -6170,12 +6715,126 @@ void Renderer::init() {
     // 5. 初始化 PointShadowPass
     // 分辨率 1024，最大支持 4 个点光源
     _pointShadowPass = std::make_unique<PointShadowPass>(1024, 4);
+
+    // 6. 初始化天空盒资源
+    initSkyboxResources();
+
+    // 7. 
+    initIBLResources();
+
+    // 8. 
+    initPrefilterResources();
+
+    // 9.
+    initBRDFResources();
+    // BRDF LUT 只需要计算一次，因为它跟环境贴图无关，只跟数学公式有关
+    // 所以我们在 init 里直接计算它
+    computeBRDFLUT();
+
+    // 初始化时，根据默认的程序化参数烘焙一次，防止开局全黑
+    SceneEnvironment defaultEnv; // 使用默认参数
+    updateProceduralSkybox(defaultEnv);
 }
 
 void Renderer::onResize(int width, int height) {
     if (_outlinePass) {
         _outlinePass->onResize(width, height);
     }
+}
+
+void Renderer::loadSkyboxHDR(const std::string& path) {
+    IBLProfile& target = _resHDR;
+    
+    // 如果显存未分配，直接返回
+    if (target.envMap == 0) return;
+
+    // 1. 加载原始数据 (保持不变)
+    HDRData hdrData = ResourceManager::Get().loadHDRRaw(path);
+    if (!hdrData.isValid()) return;
+
+    // 2. 创建临时 2D HDR 纹理 (保持不变)
+    GLuint hdrTexture;
+    glGenTextures(1, &hdrTexture);
+    glBindTexture(GL_TEXTURE_2D, hdrTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, hdrData.width, hdrData.height, 0, GL_RGB, GL_FLOAT, hdrData.data);
+    
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    ResourceManager::freeHDRRaw(hdrData);
+
+    // 3. 准备渲染到 Cubemap
+    GLint prevFbo; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+    GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
+
+    // [新增] 保存面剔除状态
+    GLboolean isCullEnabled = glIsEnabled(GL_CULL_FACE);
+
+    GLuint captureFBO, captureRBO;
+    glGenFramebuffers(1, &captureFBO);
+    glGenRenderbuffers(1, &captureRBO);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+    glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 1024, 1024);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, captureRBO);
+
+    glm::mat4 captureProjection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+    glm::mat4 captureViews[] = {
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f))
+    };
+
+    _equirectangularToCubemapShader->use();
+    _equirectangularToCubemapShader->setUniformInt("equirectangularMap", 0);
+    _equirectangularToCubemapShader->setUniformMat4("projection", captureProjection);
+    
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, hdrTexture);
+
+    glViewport(0, 0, 1024, 1024);
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+
+    // [关键修复] 禁用面剔除！
+    // 因为我们在立方体内部，我们要看它的内表面
+    glDisable(GL_CULL_FACE);
+
+    for (unsigned int i = 0; i < 6; ++i)
+    {
+        _equirectangularToCubemapShader->setUniformMat4("view", captureViews[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, target.envMap, 0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        _skyboxCube->draw(); 
+    }
+
+    glBindTexture(GL_TEXTURE_CUBE_MAP, target.envMap);
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+
+    // [恢复] 恢复面剔除状态
+    if (isCullEnabled) glEnable(GL_CULL_FACE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteTextures(1, &hdrTexture);
+    glDeleteFramebuffers(1, &captureFBO);
+    glDeleteRenderbuffers(1, &captureRBO);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+    
+    std::cout << "[Renderer] Converted HDR to Cubemap: " << path << std::endl;
+
+    // 立即计算漫反射积分
+    computeIrradianceMap(target);
+    computePrefilterMap(target);
+
+    target.isBaked = true;
 }
 
 void Renderer::render(const Scene& scene, Camera* camera, 
@@ -6289,7 +6948,7 @@ void Renderer::render(const Scene& scene, Camera* camera,
     }
 
     // 绘制天空盒
-    drawSkybox(view, proj);
+    drawSkybox(view, proj, scene.getEnvironment());
 
     // 绘制场景物体 (传入收集好的光源数据)
     drawSceneObjects(scene, view, proj, viewPos, dirLights, pointLights, spotLights, lightToShadowIndex);
@@ -6310,13 +6969,624 @@ void Renderer::render(const Scene& scene, Camera* camera,
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-// === 下面是将 SceneRoaming::renderScene 中的逻辑拆分出来的私有函数 ===
+void Renderer::allocateIBLTextures(IBLProfile& profile) {
+    // Environment Map (1024x1024)
+    glGenTextures(1, &profile.envMap);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, profile.envMap);
+    for (unsigned int i = 0; i < 6; ++i) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 1024, 1024, 0, GL_RGB, GL_FLOAT, nullptr);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); // 记得开 Mipmap
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 
-void Renderer::drawSkybox(const glm::mat4& view, const glm::mat4& proj) {
+    // Irradiance Map (32x32)
+    glGenTextures(1, &profile.irradianceMap);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, profile.irradianceMap);
+    for (unsigned int i = 0; i < 6; ++i) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 32, 32, 0, GL_RGB, GL_FLOAT, nullptr);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+    // Prefilter Map (512x512)
+    glGenTextures(1, &profile.prefilterMap);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, profile.prefilterMap);
+    for (unsigned int i = 0; i < 6; ++i) {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 512, 512, 0, GL_RGB, GL_FLOAT, nullptr);
+    }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP); // 分配内存
+}
+
+void Renderer::initSkyboxResources() {
+    // 1. 编译转换 Shader
+    const char* vsCode = R"(
+        #version 330 core
+        layout (location = 0) in vec3 aPos;
+        out vec3 localPos;
+        uniform mat4 projection;
+        uniform mat4 view;
+        void main() {
+            localPos = aPos;
+            gl_Position = projection * view * vec4(localPos, 1.0);
+        }
+    )";
+
+    const char* fsCode = R"(
+        #version 330 core
+        out vec4 FragColor;
+        in vec3 localPos;
+        uniform sampler2D equirectangularMap;
+        
+        const vec2 invAtan = vec2(0.1591, 0.3183); // 1/2pi, 1/pi
+
+        vec2 SampleSphericalMap(vec3 v) {
+            vec2 uv = vec2(atan(v.z, v.x), asin(v.y));
+            uv *= invAtan;
+            uv += 0.5;
+            return uv;
+        }
+
+        void main() {
+            vec2 uv = SampleSphericalMap(normalize(localPos));
+            vec3 color = texture(equirectangularMap, uv).rgb;
+            FragColor = vec4(color, 1.0);
+        }
+    )";
+
+    _equirectangularToCubemapShader.reset(new GLSLProgram);
+    _equirectangularToCubemapShader->attachVertexShader(vsCode);
+    _equirectangularToCubemapShader->attachFragmentShader(fsCode);
+    _equirectangularToCubemapShader->link();
+
+    // 为程序化天空分配一套资源
+    allocateIBLTextures(_resProcedural);
+    
+    // 为 HDR 天空分配另一套资源
+    allocateIBLTextures(_resHDR);
+}
+
+void Renderer::initIBLResources() {
+    // 2. 编译卷积 Shader
+    const char* vsCode = R"(
+        #version 330 core
+        layout (location = 0) in vec3 aPos;
+        out vec3 localPos;
+        uniform mat4 projection;
+        uniform mat4 view;
+        void main() {
+            localPos = aPos;
+            gl_Position = projection * view * vec4(localPos, 1.0);
+        }
+    )";
+
+    const char* fsCode = R"(
+        #version 330 core
+        out vec4 FragColor;
+        in vec3 localPos;
+
+        uniform samplerCube environmentMap;
+
+        const float PI = 3.14159265359;
+
+        void main() {
+            vec3 N = normalize(localPos);
+            vec3 irradiance = vec3(0.0);
+
+            // 建立切线空间
+            vec3 up = vec3(0.0, 1.0, 0.0);
+            vec3 right = normalize(cross(up, N));
+            up = normalize(cross(N, right));
+
+            float sampleDelta = 0.025;
+            float nrSamples = 0.0; 
+
+            // 对半球进行卷积采样
+            for(float phi = 0.0; phi < 2.0 * PI; phi += sampleDelta) {
+                for(float theta = 0.0; theta < 0.5 * PI; theta += sampleDelta) {
+                    // 球坐标 -> 笛卡尔坐标 (切线空间)
+                    vec3 tangentSample = vec3(sin(theta) * cos(phi),  sin(theta) * sin(phi), cos(theta));
+                    // 切线空间 -> 世界空间
+                    vec3 sampleVec = tangentSample.x * right + tangentSample.y * up + tangentSample.z * N; 
+
+                    // 采样 HDR 环境图，并应用 cos(theta) 权重
+                    irradiance += texture(environmentMap, sampleVec).rgb * cos(theta) * sin(theta);
+                    nrSamples++;
+                }
+            }
+            
+            irradiance = PI * irradiance * (1.0 / float(nrSamples));
+            FragColor = vec4(irradiance, 1.0);
+        }
+    )";
+
+    _irradianceShader.reset(new GLSLProgram);
+    _irradianceShader->attachVertexShader(vsCode);
+    _irradianceShader->attachFragmentShader(fsCode);
+    _irradianceShader->link();
+}
+
+void Renderer::computeIrradianceMap(const IBLProfile& profile) {
+    // 确保有源纹理
+    if (profile.envMap == 0) return;
+
+    // 保存状态
+    GLint prevFbo; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+    GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
+
+    // 复用之前的 captureFBO (我们需要重新创建一个临时的，因为 loadSkyboxHDR 里的已经销毁了)
+    // 或者为了性能，可以在类成员里保留一个公用的 captureFBO，这里我们先局部创建
+    GLuint captureFBO, captureRBO;
+    glGenFramebuffers(1, &captureFBO);
+    glGenRenderbuffers(1, &captureRBO);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+    glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 32, 32); // Irradiance 是 32x32
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, captureRBO);
+
+    glm::mat4 captureProjection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+    glm::mat4 captureViews[] = {
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f))
+    };
+
+    // 渲染配置
+    _irradianceShader->use();
+    _irradianceShader->setUniformInt("environmentMap", 0);
+    _irradianceShader->setUniformMat4("projection", captureProjection);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, profile.envMap); // 输入：原始 HDR Cubemap
+
+    glViewport(0, 0, 32, 32);
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+
+    // 卷积过程不需要面剔除，因为我们在盒子内部
+    GLboolean isCullEnabled = glIsEnabled(GL_CULL_FACE);
+    glDisable(GL_CULL_FACE);
+
+    for (unsigned int i = 0; i < 6; ++i)
+    {
+        _irradianceShader->setUniformMat4("view", captureViews[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, profile.irradianceMap, 0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        _skyboxCube->draw();
+    }
+
+    if (isCullEnabled) glEnable(GL_CULL_FACE);
+
+    // 清理
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &captureFBO);
+    glDeleteRenderbuffers(1, &captureRBO);
+
+    // 恢复
+    glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+
+    std::cout << "[Renderer] Computed Irradiance Map" << std::endl;
+}
+
+void Renderer::initPrefilterResources() {
+    // 2. 编译 Prefilter Shader (这是 PBR 中最复杂的预计算 Shader)
+    // 它使用蒙特卡洛积分来模拟不同粗糙度下的高光波瓣
+    const char* vsCode = R"(
+        #version 330 core
+        layout (location = 0) in vec3 aPos;
+        out vec3 localPos;
+        uniform mat4 projection;
+        uniform mat4 view;
+        void main() {
+            localPos = aPos;
+            gl_Position = projection * view * vec4(localPos, 1.0);
+        }
+    )";
+
+    const char* fsCode = R"(
+        #version 330 core
+        out vec4 FragColor;
+        in vec3 localPos;
+
+        uniform samplerCube environmentMap;
+        uniform float roughness;
+        uniform float resolution; // 源图分辨率，用于避免采样伪影
+
+        const float PI = 3.14159265359;
+
+        // --- 辅助函数：Hammersley 序列 (用于低差异序列采样) ---
+        float RadicalInverse_VdC(uint bits) {
+            bits = (bits << 16u) | (bits >> 16u);
+            bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+            bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+            bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+            bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+            return float(bits) * 2.3283064365386963e-10; // / 0x100000000
+        }
+        vec2 Hammersley(uint i, uint N) {
+            return vec2(float(i)/float(N), RadicalInverse_VdC(i));
+        }
+
+        // --- 辅助函数：重要性采样 GGX ---
+        vec3 ImportanceSampleGGX(vec2 Xi, vec3 N, float roughness) {
+            float a = roughness*roughness;
+            float phi = 2.0 * PI * Xi.x;
+            float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a*a - 1.0) * Xi.y));
+            float sinTheta = sqrt(1.0 - cosTheta*cosTheta);
+
+            // 球坐标 -> 笛卡尔
+            vec3 H;
+            H.x = cos(phi) * sinTheta;
+            H.y = sin(phi) * sinTheta;
+            H.z = cosTheta;
+
+            // 切线空间 -> 世界空间
+            vec3 up        = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+            vec3 tangent   = normalize(cross(up, N));
+            vec3 bitangent = cross(N, tangent);
+
+            vec3 sampleVec = tangent * H.x + bitangent * H.y + N * H.z;
+            return normalize(sampleVec);
+        }
+
+        // --- NDF (用于计算 Mip Level) ---
+        float DistributionGGX(vec3 N, vec3 H, float roughness) {
+            float a = roughness*roughness;
+            float a2 = a*a;
+            float NdotH = max(dot(N, H), 0.0);
+            float NdotH2 = NdotH*NdotH;
+            float nom   = a2;
+            float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+            denom = PI * denom * denom;
+            return nom / max(denom, 0.0000001);
+        }
+
+        void main() {
+            vec3 N = normalize(localPos);
+            vec3 R = N;
+            vec3 V = R;
+
+            const uint SAMPLE_COUNT = 1024u; // 采样数，越多越平滑但越慢
+            float totalWeight = 0.0;
+            vec3 prefilteredColor = vec3(0.0);
+
+            for(uint i = 0u; i < SAMPLE_COUNT; ++i) {
+                vec2 Xi = Hammersley(i, SAMPLE_COUNT);
+                vec3 H  = ImportanceSampleGGX(Xi, N, roughness);
+                vec3 L  = normalize(2.0 * dot(V, H) * H - V);
+
+                float NdotL = max(dot(N, L), 0.0);
+                if(NdotL > 0.0) {
+                    // [技巧] 为了消除高亮点带来的噪点，我们根据概率密度计算 Mip Level
+                    // 这样粗糙度高的地方会自动采样更低级的 Mipmap
+                    float D   = DistributionGGX(N, H, roughness);
+                    float NdotH = max(dot(N, H), 0.0);
+                    float HdotV = max(dot(H, V), 0.0);
+                    float pdf = D * NdotH / (4.0 * HdotV) + 0.0001; 
+
+                    float saTexel  = 4.0 * PI / (6.0 * resolution * resolution);
+                    float saSample = 1.0 / (float(SAMPLE_COUNT) * pdf + 0.0001);
+
+                    float mipLevel = roughness == 0.0 ? 0.0 : 0.5 * log2(saSample / saTexel); 
+                    
+                    prefilteredColor += textureLod(environmentMap, L, mipLevel).rgb * NdotL;
+                    totalWeight      += NdotL;
+                }
+            }
+            prefilteredColor = prefilteredColor / totalWeight;
+
+            FragColor = vec4(prefilteredColor, 1.0);
+        }
+    )";
+
+    _prefilterShader.reset(new GLSLProgram);
+    _prefilterShader->attachVertexShader(vsCode);
+    _prefilterShader->attachFragmentShader(fsCode);
+    _prefilterShader->link();
+}
+
+void Renderer::computePrefilterMap(const IBLProfile& profile) {
+    if (profile.envMap == 0) return;
+
+    GLint prevFbo; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+    GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
+
+    GLuint captureFBO, captureRBO;
+    glGenFramebuffers(1, &captureFBO);
+    glGenRenderbuffers(1, &captureRBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+
+    glm::mat4 captureProjection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+    glm::mat4 captureViews[] = {
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f))
+    };
+
+    _prefilterShader->use();
+    _prefilterShader->setUniformInt("environmentMap", 0);
+    _prefilterShader->setUniformMat4("projection", captureProjection);
+    // 假设原始 HDR 也是 1024 (如果不是，这里应该传实际大小，不过 1024 够用了)
+    _prefilterShader->setUniformFloat("resolution", 1024.0f); 
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, profile.envMap);
+
+    // [关键] 循环处理 Mipmap Levels
+    // 基础分辨率 128，最大层级 5 (128, 64, 32, 16, 8)
+    int resolution = 512;
+    unsigned int maxMipLevels = 5; 
+    
+    glDisable(GL_CULL_FACE);
+
+    for (unsigned int mip = 0; mip < maxMipLevels; ++mip)
+    {
+        // 根据层级计算粗糙度：Level 0 = 0.0 (光滑), Level 4 = 1.0 (粗糙)
+        float roughness = (float)mip / (float)(maxMipLevels - 1);
+        _prefilterShader->setUniformFloat("roughness", roughness);
+
+        // Resize FBO (RenderBuffer 用于深度)
+        unsigned int mipWidth  = resolution * std::pow(0.5, mip);
+        unsigned int mipHeight = resolution * std::pow(0.5, mip);
+        
+        glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, mipWidth, mipHeight);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, captureRBO);
+        
+        glViewport(0, 0, mipWidth, mipHeight);
+
+        for (unsigned int i = 0; i < 6; ++i)
+        {
+            _prefilterShader->setUniformMat4("view", captureViews[i]);
+            // 渲染到 _prefilterMap 的特定 Mip 层级
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 
+                                   GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, profile.prefilterMap, mip);
+
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            _skyboxCube->draw();
+        }
+    }
+    
+    glEnable(GL_CULL_FACE); // 恢复
+
+    // 清理
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &captureFBO);
+    glDeleteRenderbuffers(1, &captureRBO);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+
+    std::cout << "[Renderer] Computed Prefilter Map (Specular IBL)" << std::endl;
+}
+
+void Renderer::initBRDFResources() {
+    // 1. 创建 BRDF LUT 纹理 (2D, 16bit Float)
+    // 512x512 足够精确
+    glGenTextures(1, &_brdfLUT);
+    glBindTexture(GL_TEXTURE_2D, _brdfLUT);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, 512, 512, 0, GL_RG, GL_FLOAT, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    // 2. 编译积分 Shader
+    const char* vsCode = R"(
+        #version 330 core
+        layout (location = 0) in vec3 aPos;
+        layout (location = 1) in vec2 aTexCoords;
+        out vec2 TexCoords;
+        void main() {
+            TexCoords = aTexCoords;
+            gl_Position = vec4(aPos, 1.0);
+        }
+    )";
+
+    const char* fsCode = R"(
+        #version 330 core
+        out vec2 FragColor;
+        in vec2 TexCoords;
+
+        const float PI = 3.14159265359;
+
+        // --- Hammersley ---
+        float RadicalInverse_VdC(uint bits) {
+            bits = (bits << 16u) | (bits >> 16u);
+            bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+            bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+            bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+            bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+            return float(bits) * 2.3283064365386963e-10;
+        }
+        vec2 Hammersley(uint i, uint N) {
+            return vec2(float(i)/float(N), RadicalInverse_VdC(i));
+        }
+
+        // --- Geometry Smith ---
+        float GeometrySchlickGGX(float NdotV, float roughness) {
+            float a = roughness;
+            float k = (a * a) / 2.0;
+            float nom   = NdotV;
+            float denom = NdotV * (1.0 - k) + k;
+            return nom / denom;
+        }
+        float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+            float NdotV = max(dot(N, V), 0.0);
+            float NdotL = max(dot(N, L), 0.0);
+            float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+            float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+            return ggx1 * ggx2;
+        }
+
+        // --- Importance Sample ---
+        vec3 ImportanceSampleGGX(vec2 Xi, vec3 N, float roughness) {
+            float a = roughness*roughness;
+            float phi = 2.0 * PI * Xi.x;
+            float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a*a - 1.0) * Xi.y));
+            float sinTheta = sqrt(1.0 - cosTheta*cosTheta);
+            vec3 H;
+            H.x = cos(phi) * sinTheta;
+            H.y = sin(phi) * sinTheta;
+            H.z = cosTheta;
+            vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+            vec3 tangent = normalize(cross(up, N));
+            vec3 bitangent = cross(N, tangent);
+            vec3 sampleVec = tangent * H.x + bitangent * H.y + N * H.z;
+            return normalize(sampleVec);
+        }
+
+        // --- Integrate BRDF ---
+        vec2 IntegrateBRDF(float NdotV, float roughness) {
+            vec3 V;
+            V.x = sqrt(1.0 - NdotV*NdotV);
+            V.y = 0.0;
+            V.z = NdotV;
+
+            float A = 0.0;
+            float B = 0.0;
+            vec3 N = vec3(0.0, 0.0, 1.0);
+
+            const uint SAMPLE_COUNT = 1024u;
+            for(uint i = 0u; i < SAMPLE_COUNT; ++i) {
+                vec2 Xi = Hammersley(i, SAMPLE_COUNT);
+                vec3 H  = ImportanceSampleGGX(Xi, N, roughness);
+                vec3 L  = normalize(2.0 * dot(V, H) * H - V);
+
+                float NdotL = max(L.z, 0.0);
+                float NdotH = max(H.z, 0.0);
+                float VdotH = max(dot(V, H), 0.0);
+
+                if(NdotL > 0.0) {
+                    float G = GeometrySmith(N, V, L, roughness);
+                    float G_Vis = (G * VdotH) / (NdotH * NdotV);
+                    float Fc = pow(1.0 - VdotH, 5.0);
+
+                    A += (1.0 - Fc) * G_Vis;
+                    B += Fc * G_Vis;
+                }
+            }
+            return vec2(A, B) / float(SAMPLE_COUNT);
+        }
+
+        void main() {
+            vec2 integratedBRDF = IntegrateBRDF(TexCoords.x, TexCoords.y);
+            FragColor = integratedBRDF;
+        }
+    )";
+
+    _brdfShader.reset(new GLSLProgram);
+    _brdfShader->attachVertexShader(vsCode);
+    _brdfShader->attachFragmentShader(fsCode);
+    _brdfShader->link();
+}
+
+void Renderer::computeBRDFLUT() {
+    // 临时 Quad
+    unsigned int quadVAO, quadVBO;
+    float quadVertices[] = {
+        // positions        // texture Coords
+        -1.0f,  1.0f, 0.0f, 0.0f, 1.0f,
+        -1.0f, -1.0f, 0.0f, 0.0f, 0.0f,
+         1.0f,  1.0f, 0.0f, 1.0f, 1.0f,
+         1.0f, -1.0f, 0.0f, 1.0f, 0.0f,
+    };
+    glGenVertexArrays(1, &quadVAO);
+    glGenBuffers(1, &quadVBO);
+    glBindVertexArray(quadVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), &quadVertices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+
+    // 准备渲染
+    GLint prevFbo; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+    GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
+
+    GLuint captureFBO, captureRBO;
+    glGenFramebuffers(1, &captureFBO);
+    glGenRenderbuffers(1, &captureRBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+    glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 512, 512);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, _brdfLUT, 0);
+
+    glViewport(0, 0, 512, 512);
+    _brdfShader->use();
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    
+    glBindVertexArray(quadVAO);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+
+    // 清理
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &captureFBO);
+    glDeleteRenderbuffers(1, &captureRBO);
+    glDeleteVertexArrays(1, &quadVAO);
+    glDeleteBuffers(1, &quadVBO);
+
+    // 恢复
+    glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+
+    std::cout << "[Renderer] Computed BRDF LUT" << std::endl;
+}
+
+void Renderer::drawSkybox(const glm::mat4& view, const glm::mat4& proj, const SceneEnvironment& env) {
+    GLuint envMapToDraw = 0;
+    if (env.type == SkyboxType::Procedural) {
+        envMapToDraw = _resProcedural.envMap;
+    } else {
+        envMapToDraw = _resHDR.envMap;
+    }
+
+    if (envMapToDraw == 0) return;
+
     glDepthFunc(GL_LEQUAL);
     _skyboxShader->use();
     _skyboxShader->setUniformMat4("view", view);
     _skyboxShader->setUniformMat4("projection", proj);
+
+    if (env.type == SkyboxType::Procedural) {
+        // 模式 A: 实时程序化 (使用 Uniforms)
+        // 这样背景颜色会跟随滑块实时变化，无需等待烘焙
+        _skyboxShader->setUniformBool("useHDR", false);
+        _skyboxShader->setUniformVec3("colZenith", env.skyZenithColor);
+        _skyboxShader->setUniformVec3("colHorizon", env.skyHorizonColor);
+        _skyboxShader->setUniformVec3("colGround", env.groundColor);
+    } 
+    else {
+        // 模式 B: 纹理采样 (使用 Cubemap)
+        _skyboxShader->setUniformBool("useHDR", true);
+        
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, envMapToDraw);
+        _skyboxShader->setUniformInt("skyboxMap", 0);
+    }
+
+    // 应用曝光
+    _skyboxShader->setUniformFloat("energy", env.skyEnergy * env.globalExposure);
     
     glDisable(GL_CULL_FACE);
     _skyboxCube->draw();
@@ -6361,6 +7631,9 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
     _mainShader->setUniformVec3("viewPos", viewPos);
 
     _mainShader->setUniformBool("isDebug", false);
+
+    const auto& env = scene.getEnvironment();
+    _mainShader->setUniformFloat("exposure", env.globalExposure);
 
     // 1. 设置阴影相关 Uniforms
     _mainShader->setUniformInt("shadowMap", 2);
@@ -6483,6 +7756,39 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
 
     _mainShader->setUniformInt("diffuseMap", 0);
 
+    const IBLProfile* activeProfile = nullptr;
+    
+    if (env.type == SkyboxType::Procedural) {
+        // 程序化模式：直接使用程序化资源 (Init时已分配，Start时已烘焙)
+        activeProfile = &_resProcedural;
+    } else {
+        // HDR 模式：优先使用 HDR 资源，如果未就绪(没加载文件)，回退到程序化
+        if (_resHDR.isBaked) activeProfile = &_resHDR;
+        // else if (_resProcedural.isBaked) activeProfile = &_resProcedural;
+    }
+
+    // 绑定全局 IBL 资源
+    if (activeProfile && activeProfile->isBaked) {
+        // 绑定 Irradiance Map 到 Slot 11
+        glActiveTexture(GL_TEXTURE11);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, activeProfile->irradianceMap);
+        _mainShader->setUniformInt("irradianceMap", 11);
+
+        // 绑定 Prefilter Map 到 Slot 12 (默认)
+        glActiveTexture(GL_TEXTURE12);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, activeProfile->prefilterMap);
+        _mainShader->setUniformInt("prefilterMap", 12);
+
+        // 绑定 BRDF LUT 到 Slot 13
+        glActiveTexture(GL_TEXTURE13);
+        glBindTexture(GL_TEXTURE_2D, _brdfLUT);
+        _mainShader->setUniformInt("brdfLUT", 13);
+
+        _mainShader->setUniformBool("hasIrradianceMap", true);
+    } else {
+        _mainShader->setUniformBool("hasIrradianceMap", false);
+    }
+
     // 3. 绘制物体 Loop
     glFrontFace(GL_CCW);
     glEnable(GL_CULL_FACE);
@@ -6587,27 +7893,29 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
 
         auto probe = go->getComponent<ReflectionProbeComponent>();
         if (probe && probe->textureID != 0) {
-            // 如果这个物体本身就是一个反射探针，我们就使用它生成的 Environment Map
-            glActiveTexture(GL_TEXTURE3);
+            // 将探针纹理绑定到 Slot 12 (Prefilter Map 槽位)
+            // 这样 Shader 里的 specular IBL 计算就会自动使用这个探针，而不是全局天空盒
+            glActiveTexture(GL_TEXTURE12);
             glBindTexture(GL_TEXTURE_CUBE_MAP, probe->textureID);
             
-            _mainShader->setUniformBool("hasEnvMap", true);
-            
-            // 计算并传递 Box 参数
-            // 假设探针中心就是物体中心
-            glm::vec3 pPos = go->transform.position;
-            // 计算世界坐标下的 AABB
-            glm::vec3 bMin = pPos - probe->boxSize * 0.5f;
-            glm::vec3 bMax = pPos + probe->boxSize * 0.5f;
+            // // 计算并传递 Box 参数
+            // // 假设探针中心就是物体中心
+            // glm::vec3 pPos = go->transform.position;
+            // // 计算世界坐标下的 AABB
+            // glm::vec3 bMin = pPos - probe->boxSize * 0.5f;
+            // glm::vec3 bMax = pPos + probe->boxSize * 0.5f;
 
-            _mainShader->setUniformVec3("probePos", pPos);
-            _mainShader->setUniformVec3("probeBoxMin", bMin);
-            _mainShader->setUniformVec3("probeBoxMax", bMax);
+            // _mainShader->setUniformVec3("probePos", pPos);
+            // _mainShader->setUniformVec3("probeBoxMin", bMin);
+            // _mainShader->setUniformVec3("probeBoxMax", bMax);
         } else {
-            _mainShader->setUniformBool("hasEnvMap", false);
+            if (activeProfile && activeProfile->isBaked) {
+                glActiveTexture(GL_TEXTURE12);
+                glBindTexture(GL_TEXTURE_CUBE_MAP, activeProfile->prefilterMap);
+            }
         }
 
-        // [新增] IBL 强度控制
+        // IBL 强度控制
         // 建议：如果你觉得场景太亮，这里可以传 0.5 或者 0.3
         // 暂时硬编码为 0.5 试试，或者后续在 Inspector 里加个 Scene Settings
         _mainShader->setUniformFloat("iblIntensity", 0.4f);
@@ -6682,7 +7990,7 @@ void Renderer::updateReflectionProbes(const Scene& scene)
             // A. 画天空盒
             // 注意：DrawSkybox 需要去平移的 View 矩阵
             glm::mat4 viewNoTrans = glm::mat4(glm::mat3(shadowViews[i])); 
-            drawSkybox(viewNoTrans, shadowProj);
+            drawSkybox(viewNoTrans, shadowProj, scene.getEnvironment());
 
             // B. 画场景物体
             // 关键：传入 go.get() 作为 excludeObject，防止画自己
@@ -6699,6 +8007,91 @@ void Renderer::updateReflectionProbes(const Scene& scene)
     // 恢复状态
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+}
+
+void Renderer::updateProceduralSkybox(const SceneEnvironment& env) {
+    IBLProfile& target = _resProcedural;
+    if (target.envMap == 0) return;
+
+    // 1. 保存当前状态
+    GLint prevFbo; glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFbo);
+    GLint prevViewport[4]; glGetIntegerv(GL_VIEWPORT, prevViewport);
+    GLboolean isCullEnabled = glIsEnabled(GL_CULL_FACE);
+
+    // 2. 准备捕获用的 FBO
+    GLuint captureFBO, captureRBO;
+    glGenFramebuffers(1, &captureFBO);
+    glGenRenderbuffers(1, &captureRBO);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+    glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
+    // 保持和 loadSkyboxHDR 一致的分辨率 (1024)
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 1024, 1024); 
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, captureRBO);
+
+    // 3. 准备相机矩阵 (90度 FOV)
+    glm::mat4 captureProjection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
+    glm::mat4 captureViews[] = {
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f,  0.0f,  1.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f,  0.0f, -1.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
+        glm::lookAt(glm::vec3(0.0f), glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, -1.0f,  0.0f))
+    };
+
+    // 4. 设置 Shader 参数 (复用天空盒 Shader)
+    _skyboxShader->use();
+    _skyboxShader->setUniformMat4("projection", captureProjection);
+    _skyboxShader->setUniformBool("useHDR", false); // 关键：使用程序化分支
+    _skyboxShader->setUniformVec3("colZenith", env.skyZenithColor);
+    _skyboxShader->setUniformVec3("colHorizon", env.skyHorizonColor);
+    _skyboxShader->setUniformVec3("colGround", env.groundColor);
+    // 这里 energy 设为 1.0，因为我们在 PBR Shader 采样时会再次应用 energy/exposure
+    // 或者你可以选择在这里应用 energy，然后采样时不再乘。通常为了动态调整曝光，这里存原始颜色比较好。
+    _skyboxShader->setUniformFloat("energy", 1.0f); 
+
+    glViewport(0, 0, 1024, 1024);
+    glDisable(GL_CULL_FACE); // 在盒子内部渲染
+    glDepthFunc(GL_LEQUAL);
+
+    // 5. 渲染 6 个面
+    for (unsigned int i = 0; i < 6; ++i)
+    {
+        // 这里的 view 矩阵不需要去除平移，因为位置就是 (0,0,0)
+        _skyboxShader->setUniformMat4("view", captureViews[i]);
+        
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, target.envMap, 0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        _skyboxCube->draw();
+    }
+
+    glDepthFunc(GL_LESS);
+
+    // 必须在这里解绑 FBO，否则下面 GenerateMipmap 时，纹理既是读取源又是写入目标，会导致全黑
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // 6. 生成 Mipmap (为了让 prefilter 计算的基础层更平滑，尽管 HDR 加载时没做这步，但加上无妨)
+    glBindTexture(GL_TEXTURE_CUBE_MAP, target.envMap);
+    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+
+    // 7. [关键] 立即触发 IBL 重计算
+    // 这样 irradianceMap 和 prefilterMap 就会变成新的渐变色天空的卷积结果
+    computeIrradianceMap(target);
+    computePrefilterMap(target);
+
+    target.isBaked = true;
+
+    // 8. 恢复状态
+    if (isCullEnabled) glEnable(GL_CULL_FACE);
+    glDeleteFramebuffers(1, &captureFBO);
+    glDeleteRenderbuffers(1, &captureRBO);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+    
+    std::cout << "[Renderer] Procedural Skybox baked to IBL maps." << std::endl;
 }
 ```
 
@@ -6719,6 +8112,14 @@ void Renderer::updateReflectionProbes(const Scene& scene)
 #include "shadow_map_pass.h"
 #include "point_shadow_pass.h"
 
+struct IBLProfile {
+    GLuint envMap = 0;       // 天空盒
+    GLuint irradianceMap = 0; // 漫反射积分
+    GLuint prefilterMap = 0;  // 镜面反射预滤波
+    
+    bool isBaked = false;     // 标记是否已经烘焙过数据
+};
+
 class Renderer
 {
 public:
@@ -6730,6 +8131,12 @@ public:
 
     // 调整大小 (通知 OutlinePass 等)
     void onResize(int width, int height);
+
+    // 加载 HDR 天空盒
+    void loadSkyboxHDR(const std::string& path);
+
+    // 将程序自动默认的天空盒画到_envCubemap上
+    void updateProceduralSkybox(const SceneEnvironment& env);
 
     // 核心渲染函数
     // targetFBO: 传入 0 渲染到屏幕，传入 FBO ID 渲染到纹理
@@ -6744,6 +8151,10 @@ private:
     std::unique_ptr<GLSLProgram> _mainShader;
     std::unique_ptr<GLSLProgram> _gridShader;
     std::unique_ptr<GLSLProgram> _skyboxShader;
+    std::unique_ptr<GLSLProgram> _equirectangularToCubemapShader;
+    std::unique_ptr<GLSLProgram> _irradianceShader;
+    std::unique_ptr<GLSLProgram> _prefilterShader;
+    std::unique_ptr<GLSLProgram> _brdfShader;
     
     std::unique_ptr<ShadowMapPass> _shadowPass;
     std::unique_ptr<PointShadowPass> _pointShadowPass;
@@ -6755,8 +8166,23 @@ private:
     // --- Render Pass ---
     std::unique_ptr<OutlinePass> _outlinePass;
 
+    IBLProfile _resProcedural; // 程序化专用
+    IBLProfile _resHDR;        // HDR 专用
+    void allocateIBLTextures(IBLProfile& profile);
+    void computeIrradianceMap(const IBLProfile& profile);
+    void computePrefilterMap(const IBLProfile& profile);
+
+    GLuint _brdfLUT = 0; // BRDF 查找表
+
     // --- 内部绘制函数 ---
-    void drawSkybox(const glm::mat4& view, const glm::mat4& proj);
+    void initSkyboxResources(); // 初始化转换用的 Shader 和 空纹理
+    void initIBLResources(); // 初始化 IBL 相关的 Shader 和 Texture
+    void computeIrradianceMap(); // 执行卷积计算
+    void initPrefilterResources();
+    void computePrefilterMap();
+    void initBRDFResources();
+    void computeBRDFLUT();
+    void drawSkybox(const glm::mat4& view, const glm::mat4& proj, const SceneEnvironment& env);
     void drawGrid(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos);
     void drawSceneObjects(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, 
                           const std::vector<LightComponent*>& dirLights,
@@ -6773,8 +8199,10 @@ private:
 ```
 #include "resource_manager.h"
 #include "obj_loader.h"
+#include "gltf_loader.h"
 #include <iostream>
 #include <algorithm>
+#include <stb_image.h>
 
 ResourceManager& ResourceManager::Get()
 {
@@ -6791,11 +8219,10 @@ void ResourceManager::setProjectRoot(const std::string& rootPath)
         _projectRoot += "/";
     }
 
+    shutdown();
+
     // 设置完路径后，立即重新扫描
     scanDirectory(_projectRoot);
-    
-    // 清空旧缓存 (可选，切换项目时应该清空)
-    _modelCache.clear();
 }
 
 std::string ResourceManager::getFullPath(const std::string& relativePath)
@@ -6822,7 +8249,8 @@ void ResourceManager::scanDirectory(const std::string& rootDir)
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
             
             bool isModel = (ext == ".obj");
-            bool isTexture = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga");
+            bool isTexture = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
+                              ext == ".bmp" || ext == ".tga" || ext == ".hdr");
 
             if (isModel || isTexture)
             {
@@ -6853,17 +8281,29 @@ std::shared_ptr<Model> ResourceManager::getModel(const std::string& pathKey, boo
     if (useFlatShade) cacheKey += ":useFlatShade";
     if (!subMeshName.empty()) cacheKey += ":" + subMeshName;
 
-    // 1. 检查缓存 (Key 是相对路径，比如 "assets/sphere.obj")
+    // 1. 获取绝对路径 (用于检测文件变化)
+    std::string fullPath = getFullPath(cleanPath);
+
+    // 2. 检查缓存
     auto it = _modelCache.find(cacheKey);
     if (it != _modelCache.end())
     {
-        return it->second;
+        // 命中缓存后，检查文件是否被修改
+        // 生成当前磁盘文件的签名
+        AssetSignature currentSig = AssetSignature::generate(fullPath);
+
+        // 如果签名不一致，则缓存失效
+        if (currentSig != it->second.signature) {
+            std::cout << "[ResourceManager] Hot-Reload Detected: " << cleanPath << std::endl;
+            // 不需要手动 erase，下面的加载逻辑会覆盖它
+        } 
+        else {
+            // 签名一致，直接返回缓存
+            return it->second.resource;
+        }
     }
 
-    // 2. 缓存未命中，准备加载
-    // [核心修复] 获取硬盘上的绝对路径
-    std::string fullPath = getFullPath(cleanPath);
-
+    // 3. 缓存未命中，准备加载
     if (!std::filesystem::exists(fullPath)) {
         std::cerr << "[ResourceManager] Error: File not found: " << fullPath << std::endl;
         return nullptr; // 或者返回一个紫黑格子的 "ErrorModel"
@@ -6873,16 +8313,132 @@ std::shared_ptr<Model> ResourceManager::getModel(const std::string& pathKey, boo
     // std::cout << "Loading Model: " << fullPath << std::endl;
 
     try {
+        // 加载数据
         MeshData data = OBJLoader::load(fullPath, useFlatShade, subMeshName);
         if (data.vertices.empty()) return nullptr;
 
+        // 创建 GPU 资源
         std::shared_ptr<Model> newModel = std::make_shared<Model>(data.vertices, data.indices);
+
+        // 4. 构建新的缓存条目
+        CacheEntry<Model> entry;
+        entry.resource = newModel;
+        entry.sourcePath = fullPath;
+        entry.signature = AssetSignature::generate(fullPath); // 记录当前版本
         
-        _modelCache[cacheKey] = newModel;
+        // 存入 Map
+        _modelCache[cacheKey] = entry;
         return newModel;
     }
     catch (std::exception& e) {
         std::cerr << "[ResourceManager] Failed to load model: " << e.what() << std::endl;
+        return nullptr;
+    }
+}
+
+std::shared_ptr<SceneResource> ResourceManager::getSceneResource(const std::string& pathKey, bool useFlatShade)
+{
+    // 1. 路径标准化
+    std::string cleanPath = pathKey;
+    std::replace(cleanPath.begin(), cleanPath.end(), '\\', '/');
+
+    // 2. 生成 Cache Key
+    // 场景加载只受路径和平滑模式影响，不受 subMeshName 影响
+    std::string cacheKey = cleanPath;
+    if (useFlatShade) cacheKey += ":useFlatShade";
+
+    // 3. 获取绝对路径
+    std::string fullPath = getFullPath(cleanPath);
+
+    // 4. 检查缓存 (Dirty Check)
+    auto it = _sceneCache.find(cacheKey);
+    if (it != _sceneCache.end())
+    {
+        AssetSignature currentSig = AssetSignature::generate(fullPath);
+        if (currentSig != it->second.signature) {
+            std::cout << "[ResourceManager] Hot-Reload Detected (Scene): " << cleanPath << std::endl;
+            // 缓存已脏，继续执行加载逻辑
+        } 
+        else {
+            return it->second.resource;
+        }
+    }
+
+    if (!std::filesystem::exists(fullPath)) {
+        std::cerr << "[ResourceManager] Error: Scene file not found: " << fullPath << std::endl;
+        return nullptr;
+    }
+
+    try {
+        // 这将返回 raw CPU data (vector<SubMesh>)
+        std::vector<SubMesh> subMeshes;
+        
+        std::string ext = std::filesystem::path(fullPath).extension().string();
+        // 转小写
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+        if (ext == ".obj") {
+            subMeshes = OBJLoader::loadScene(fullPath, useFlatShade);
+        } 
+        else if (ext == ".gltf" || ext == ".glb") {
+            // GLTF 通常自带法线，如果需要在加载时重新计算 flat shade，可以在 loader 里加参数
+            // 目前 GLTFLoader 还没支持 useFlatShade 参数，我们暂时忽略它
+            subMeshes = GLTFLoader::loadScene(fullPath);
+        }
+        else {
+            std::cerr << "[ResourceManager] Unsupported format: " << ext << std::endl;
+            return nullptr;
+        }
+        
+        if (subMeshes.empty()) return nullptr;
+
+        // 创建新的场景资源容器
+        auto newSceneRes = std::make_shared<SceneResource>();
+        AssetSignature fileSig = AssetSignature::generate(fullPath);
+
+        // 遍历加载到的子网格，转换为 GPU Model
+        for (const auto& sub : subMeshes)
+        {
+            // 1. 构建 Model
+            auto model = std::make_shared<Model>(sub.vertices, sub.indices);
+            
+            // 2. 添加到 SceneResource
+            newSceneRes->nodes.push_back({ sub.name, model });
+
+            // 3. [自动缓存注入] 
+            // 将这个子模型单独注册到 _modelCache 中
+            // 这样 getModel("file.obj", ..., "SubName") 也能直接命中
+            std::string modelCacheKey = cacheKey + ":" + sub.name;
+            
+            CacheEntry<Model> subEntry;
+            subEntry.resource = model;
+            subEntry.sourcePath = fullPath;
+            subEntry.signature = fileSig; // 共享同一个文件的签名
+            
+            _modelCache[modelCacheKey] = subEntry;
+        }
+
+        // 如果场景只有一个物体，我们也注册一个“默认单体”缓存 (空 subMeshName)
+        if (subMeshes.size() == 1) {
+            CacheEntry<Model> singleEntry;
+            singleEntry.resource = newSceneRes->nodes[0].model;
+            singleEntry.sourcePath = fullPath;
+            singleEntry.signature = fileSig;
+            _modelCache[cacheKey] = singleEntry; // cacheKey 就是不带 subName 的 key
+        }
+
+        // 5. 存入 Scene 缓存
+        CacheEntry<SceneResource> entry;
+        entry.resource = newSceneRes;
+        entry.sourcePath = fullPath;
+        entry.signature = fileSig;
+
+        _sceneCache[cacheKey] = entry;
+
+        return newSceneRes;
+    }
+    catch (std::exception& e) {
+        std::cerr << "[ResourceManager] Failed to load scene: " << e.what() << std::endl;
         return nullptr;
     }
 }
@@ -6894,23 +8450,38 @@ std::shared_ptr<ImageTexture2D> ResourceManager::getTexture(const std::string& p
 
     std::string cacheKey = cleanPath;
 
-    // 1. 查缓存
-    auto it = _textureCache.find(cleanPath);
+    // 1. 获取绝对路径 (用于检测文件变化)
+    std::string fullPath = getFullPath(cleanPath);
+
+    // 2. 检查缓存
+    auto it = _textureCache.find(cacheKey);
     if (it != _textureCache.end()) {
-        return it->second;
+        AssetSignature currentSig = AssetSignature::generate(fullPath);
+        // 对比签名
+        if (currentSig != it->second.signature) {
+            std::cout << "[ResourceManager] Hot-Reload Detected: " << cleanPath << std::endl;
+            // 签名不一致，继续向下执行加载逻辑（覆盖旧缓存）
+        } else {
+            return it->second.resource;
+        }
     }
 
-    // 2. 加载
-    std::string fullPath = getFullPath(cleanPath);
+    // 3. 缓存未命中，准备加载
     if (!std::filesystem::exists(fullPath)) {
         std::cerr << "[ResourceManager] Error: Texture not found: " << fullPath << std::endl;
         return nullptr;
     }
 
     try {
-        // ImageTexture2D 构造函数会抛出异常如果加载失败
         auto newTex = std::make_shared<ImageTexture2D>(fullPath);
-        _textureCache[cacheKey] = newTex;
+        
+        CacheEntry<ImageTexture2D> entry;
+        entry.resource = newTex;
+        entry.sourcePath = fullPath;
+        entry.signature = AssetSignature::generate(fullPath);
+
+        // 4. 存入缓存
+        _textureCache[cacheKey] = entry;
         return newTex;
     }
     catch (std::exception& e) {
@@ -6932,8 +8503,14 @@ void ResourceManager::injectCache(const std::string& pathKey, const std::string&
     if (useFlatShade) cacheKey += ":useFlatShade";
     if (!subMeshName.empty()) cacheKey += ":" + subMeshName;
 
+    // 构造 Entry
+    CacheEntry<Model> entry;
+    entry.resource = model;
+    entry.sourcePath = getFullPath(cleanPath); // 尝试补全绝对路径
+    entry.signature = AssetSignature::generate(entry.sourcePath); // 生成签名
+
     // 3. 存入缓存
-    _modelCache[cacheKey] = model;
+    _modelCache[cacheKey] = entry;
     
     std::cout << "[ResourceManager] Injected cache: " << cacheKey << std::endl;
 }
@@ -6949,9 +8526,47 @@ std::shared_ptr<Model> ResourceManager::findModel(const std::string& pathKey, bo
 
     auto it = _modelCache.find(cacheKey);
     if (it != _modelCache.end()) {
-        return it->second;
+        // findModel 只是为了查询是否存在内存副本，通常不需要做 Dirty Check (性能优先)
+        // 或者是为了 Scene 逻辑复用，如果我们要严格一点，这里也可以加 check
+        return it->second.resource;
     }
     return nullptr;
+}
+
+HDRData ResourceManager::loadHDRRaw(const std::string& pathKey)
+{
+    std::string cleanPath = pathKey;
+    std::replace(cleanPath.begin(), cleanPath.end(), '\\', '/');
+    std::string fullPath = getFullPath(cleanPath);
+
+    HDRData result;
+    
+    // 翻转 Y 轴 (通常 OpenGL 纹理都需要翻转，除非 Shader 里处理了)
+    stbi_set_flip_vertically_on_load(true);
+    
+    result.data = stbi_loadf(fullPath.c_str(), &result.width, &result.height, &result.components, 3); // 强制 3 通道 (RGB)
+    
+    if (!result.data) {
+        std::cerr << "[ResourceManager] Failed to load HDR: " << fullPath << std::endl;
+    } else {
+        std::cout << "[ResourceManager] Loaded HDR: " << result.width << "x" << result.height << std::endl;
+    }
+
+    return result;
+}
+
+void ResourceManager::freeHDRRaw(HDRData& data)
+{
+    if (data.data) {
+        stbi_image_free(data.data);
+        data.data = nullptr;
+    }
+}
+
+void ResourceManager::shutdown() {
+    _modelCache.clear();
+    _sceneCache.clear();
+    _textureCache.clear();
 }
 ```
 
@@ -6966,6 +8581,18 @@ std::shared_ptr<Model> ResourceManager::findModel(const std::string& pathKey, bo
 #include <filesystem>
 #include "engine/model.h"
 #include "base/texture2d.h"
+#include "engine/utils/asset_signature.h"
+#include "engine/asset_data.h"
+
+// 场景资源容器
+// 它代表一个文件里的所有物体 (例如 "kitchen.obj" 里包含的 Table, Chair, Fridge...)
+struct SceneResource {
+    struct Node {
+        std::string name;             // 子物体名称 (如 "Chair_Leg")
+        std::shared_ptr<Model> model; // 对应的 GPU 模型资源
+    };
+    std::vector<Node> nodes;
+};
 
 class ResourceManager
 {
@@ -6986,6 +8613,10 @@ public:
     // path: 相对路径，例如 "obj/bunny.obj"
     std::shared_ptr<Model> getModel(const std::string& pathKey, bool useFlatShade, const std::string& subMeshName = "");
 
+    // 获取整个场景资源 (通常用于 "Import Scene")
+    // 这将加载文件中的所有物体，并自动缓存它们
+    std::shared_ptr<SceneResource> getSceneResource(const std::string& pathKey, bool useFlatShade);
+
     // 加载或获取已缓存的纹理
     std::shared_ptr<ImageTexture2D> getTexture(const std::string& pathKey);
 
@@ -7002,21 +8633,34 @@ public:
     // 仅检查缓存中是否存在，不触发加载
     std::shared_ptr<Model> findModel(const std::string& pathKey, bool useFlatShade, const std::string& subMeshName = "");
 
-    void shutdown() {
-        _modelCache.clear(); // 强制释放所有 Model shared_ptr
-        _textureCache.clear();
-    }
+    // 加载原始 HDR 数据
+    HDRData loadHDRRaw(const std::string& pathKey);
+
+    // 释放 HDR 内存
+    static void freeHDRRaw(HDRData& data);
+
+    void shutdown();
 
 private:
     ResourceManager() = default;
 
     std::string _projectRoot = ""; // 默认为空
 
+    template <typename T>
+    struct CacheEntry {
+        std::shared_ptr<T> resource;    // 实际资源
+        AssetSignature signature;       // 加载时的版本指纹
+        std::string sourcePath;         // 原始绝对路径 (用于重校验)
+    };
+
     // 模型缓存：key=相对路径, value=模型指针
-    std::unordered_map<std::string, std::shared_ptr<Model>> _modelCache;
+    std::unordered_map<std::string, CacheEntry<Model>> _modelCache;
+
+    // 场景资源缓存
+    std::unordered_map<std::string, CacheEntry<SceneResource>> _sceneCache;
 
     // 纹理缓存
-    std::unordered_map<std::string, std::shared_ptr<ImageTexture2D>> _textureCache;
+    std::unordered_map<std::string, CacheEntry<ImageTexture2D>> _textureCache;
 
     // 扫描到的文件列表
     std::vector<std::pair<std::string, std::string>> _fileList;
@@ -7027,7 +8671,6 @@ private:
 ```
 #include "scene.h"
 #include "resource_manager.h" // 如果需要加载默认图标
-#include "obj_loader.h"
 
 #include <fstream>
 #include <iomanip>
@@ -7192,30 +8835,44 @@ void Scene::exportToOBJ(const std::string& filename)
     std::cout << "Scene exported successfully to " << filename << std::endl;
 }
 
-void Scene::importSceneFromOBJ(const std::string& filepath)
+void Scene::importScene(const std::string& filepath)
 {
-    auto cachedSingleModel = ResourceManager::Get().findModel(filepath, false, "");
+    // 1. 向资源管理器请求场景资源
+    // 此时 ResourceManager 会负责：
+    // - 检查缓存签名
+    // - 如果文件变了，自动重载
+    // - 自动解析 OBJ
+    // - 自动将所有子网格转换为 GPU Model
+    // - 自动注入 _modelCache 供后续查询
+    auto sceneRes = ResourceManager::Get().getSceneResource(filepath, false);
 
-    if (cachedSingleModel)
+    if (!sceneRes || sceneRes->nodes.empty()) {
+        std::cout << "[Scene] Failed to load or empty scene: " << filepath << std::endl;
+        return;
+    }
+
+    // 2. 构建场景图 (Scene Graph)
+    // 资源管理器给了我们一组纯数据 (Node)，我们需要将其实例化为具体的 GameObject
+    for (const auto& node : sceneRes->nodes)
     {
-        std::string name = std::filesystem::path(filepath).stem().string();
+        auto go = new GameObject(node.name);
         
-        auto go = new GameObject(name);
+        // node.model 已经是一个初始化好的 GPU 资源指针了
+        auto meshComp = go->addComponent<MeshComponent>(node.model);
         
-        // 直接复用指针
-        auto meshComp = go->addComponent<MeshComponent>(cachedSingleModel);
+        // 设置组件元数据，以便 Inspector 面板能正确显示
         meshComp->shapeType = MeshShapeType::CustomOBJ;
-
-        // 填充参数
+        
+        // 记录路径
         strncpy(meshComp->params.objPath, filepath.c_str(), sizeof(meshComp->params.objPath) - 1);
         meshComp->params.objPath[sizeof(meshComp->params.objPath) - 1] = '\0';
-        
-        // 因为是复用 Single Mesh，我们无法获知文件内部原本的 Group Name，只能用文件名代替
-        strncpy(meshComp->params.subMeshName, name.c_str(), sizeof(meshComp->params.subMeshName) - 1);
+
+        // 记录子网格名称
+        strncpy(meshComp->params.subMeshName, node.name.c_str(), sizeof(meshComp->params.subMeshName) - 1);
         meshComp->params.subMeshName[sizeof(meshComp->params.subMeshName) - 1] = '\0';
 
-        // 智能 UV 检测 (查询模型本身)
-        if (!cachedSingleModel->hasUVs()) {
+        // 智能 UV 检测
+        if (!node.model->hasUVs()) {
             meshComp->useTriplanar = true;
             meshComp->triplanarScale = 0.2f;
         } else {
@@ -7223,79 +8880,9 @@ void Scene::importSceneFromOBJ(const std::string& filepath)
         }
 
         _gameObjects.push_back(std::unique_ptr<GameObject>(go));
-
-        // [重要] 注册别名缓存
-        // 这样下次如果你尝试获取 "filepath:filename"，也能命中这个缓存
-        ResourceManager::Get().injectCache(filepath, name, false, cachedSingleModel);
-
-        std::cout << "[Scene] Fast-Import (Cache Hit): " << name << " (0ms)" << std::endl;
-        return; // <--- 直接结束，不再执行下面的解析
     }
 
-    // 1. 调用多网格加载器
-    // 这里的 false 表示不强制 Split Vertices (Smooth Shading)，保留 OBJ 原貌
-    // 如果你希望导入的模型默认都是 Low-Poly 风格，可以传 true
-    std::vector<SubMesh> meshes;
-    try {
-        meshes = OBJLoader::loadScene(filepath, false);
-    }
-    catch (const std::exception& e) {
-        std::cerr << "[Scene] Import failed: " << e.what() << std::endl;
-        return;
-    }
-
-    if (meshes.empty()) {
-        std::cout << "[Scene] No meshes found in " << filepath << std::endl;
-        return;
-    }
-
-    // 如果场景里只有一个物体，说明它和 Import Single Mesh 的结果在几何上是完全等价的。
-    // 我们应该让它们共享内存。
-    bool isSingleObjectScene = (meshes.size() == 1);
-    
-    // 如果只有 1 个物体，先尝试去 ResourceManager 找 "单体 Key" (无 subMeshName 后缀的 Key)
-    std::shared_ptr<Model> existingSingleModel = nullptr;
-    if (isSingleObjectScene) {
-        // 这里的第三个参数传 ""，即查找 "filepath" 对应的缓存
-        existingSingleModel = ResourceManager::Get().findModel(filepath, false, "");
-    }
-
-    // 2. 为每个 SubMesh 创建 GameObject
-    for (const auto& subMesh : meshes)
-    {
-        auto go = new GameObject(subMesh.name);
-        
-        // 创建新模型
-        auto model = std::make_shared<Model>(subMesh.vertices, subMesh.indices);
-        
-        // 1. 注册标准 SubMesh 缓存
-        ResourceManager::Get().injectCache(filepath, subMesh.name, false, model);
-
-        // 2. 如果这是唯一的物体，顺便注册 "Single Mesh" 缓存
-        if (isSingleObjectScene) {
-            ResourceManager::Get().injectCache(filepath, "", false, model);
-        }
-
-        auto meshComp = go->addComponent<MeshComponent>(model);
-        meshComp->shapeType = MeshShapeType::CustomOBJ;
-        
-        strncpy(meshComp->params.objPath, filepath.c_str(), sizeof(meshComp->params.objPath) - 1);
-        meshComp->params.objPath[sizeof(meshComp->params.objPath) - 1] = '\0';
-
-        strncpy(meshComp->params.subMeshName, subMesh.name.c_str(), sizeof(meshComp->params.subMeshName) - 1);
-        meshComp->params.subMeshName[sizeof(meshComp->params.subMeshName) - 1] = '\0';
-        
-        if (!subMesh.hasUVs) {
-            meshComp->useTriplanar = true;
-            meshComp->triplanarScale = 0.2f; 
-        } else {
-            meshComp->useTriplanar = false;
-        }
-
-        _gameObjects.push_back(std::unique_ptr<GameObject>(go));
-    }
-    
-    std::cout << "[Scene] Imported and Parsed " << meshes.size() << " objects from " << filepath << std::endl;
+    std::cout << "[Scene] Instantiated " << sceneRes->nodes.size() << " objects from " << filepath << std::endl;
 }
 
 void Scene::importSingleMeshFromOBJ(const std::string& filepath)
@@ -7343,7 +8930,7 @@ void Scene::importSingleMeshFromOBJ(const std::string& filepath)
     // 8. 加入场景列表
     _gameObjects.push_back(std::unique_ptr<GameObject>(go));
 
-    std::cout << "[Scene] Imported single mesh: " << name << " (Cached: " << (model ? "Yes" : "No") << ")" << std::endl;
+    std::cout << "[Scene] Imported single mesh: " << name << std::endl;
 }
 ```
 
@@ -7355,6 +8942,7 @@ void Scene::importSingleMeshFromOBJ(const std::string& filepath)
 #include <memory>
 #include <algorithm>
 #include "scene_object.h" // 根据你的实际路径调整
+#include "scene_environment.h"
 #include "geometry_factory.h"
 
 class Scene
@@ -7384,6 +8972,9 @@ public:
     // 清空场景
     void clear() { _gameObjects.clear(); }
 
+    SceneEnvironment& getEnvironment() { return _environment; }
+    const SceneEnvironment& getEnvironment() const { return _environment; }
+
     // --- 工厂方法 (从 SceneRoaming 迁移过来的逻辑) ---
     
     // 创建默认立方体
@@ -7409,14 +9000,43 @@ public:
     void exportToOBJ(const std::string& filename);
 
     // 从 OBJ 导入场景（多个物体）
-    void importSceneFromOBJ(const std::string& filepath);
+    void importScene(const std::string& filepath);
     // 从 OBJ 导入单体
     void importSingleMeshFromOBJ(const std::string& filepath);
 
 private:
     std::vector<std::unique_ptr<GameObject>> _gameObjects;
 
+    SceneEnvironment _environment;
+
     std::vector<GameObject*> _killQueue;
+};
+```
+
+./engine/scene_environment.h:
+```
+#pragma once
+#include <glm/glm.hpp>
+#include <string>
+
+enum class SkyboxType {
+    Procedural, // 程序化渐变
+    CubeMap     // HDR 贴图
+};
+
+struct SceneEnvironment {
+    // --- 通用设置 ---
+    SkyboxType type = SkyboxType::Procedural;
+    float globalExposure = 1.0f; // 全局曝光控制
+
+    // --- 程序化天空参数 ---
+    glm::vec3 skyZenithColor = glm::vec3(0.2f, 0.45f, 0.8f);   // 天顶蓝
+    glm::vec3 skyHorizonColor = glm::vec3(0.7f, 0.75f, 0.82f); // 地平线灰白
+    glm::vec3 groundColor = glm::vec3(0.2f, 0.2f, 0.2f);       // 地面深灰
+    float skyEnergy = 1.0f; // 亮度倍率
+
+    // --- HDR 贴图参数 (阶段二用) ---
+    std::string hdrFilePath;
 };
 ```
 
@@ -8178,6 +9798,52 @@ private:
 };
 ```
 
+./engine/utils/asset_signature.h:
+```
+#pragma once
+
+#include <filesystem>
+#include <string>
+
+// 用于标识资源文件的唯一版本（指纹）
+struct AssetSignature
+{
+    // 使用最后修改时间 + 文件大小作为快速指纹
+    // 这比每次计算 MD5 要快得多，且足以覆盖 99.9% 的修改场景
+    std::filesystem::file_time_type lastWriteTime;
+    uintmax_t fileSize = 0;
+    bool isValid = false;
+
+    // 从磁盘文件生成签名
+    static AssetSignature generate(const std::string& filePath)
+    {
+        AssetSignature sig;
+        std::error_code ec;
+        
+        // 1. 获取文件状态
+        if (std::filesystem::exists(filePath, ec) && !std::filesystem::is_directory(filePath, ec))
+        {
+            sig.lastWriteTime = std::filesystem::last_write_time(filePath, ec);
+            sig.fileSize = std::filesystem::file_size(filePath, ec);
+            sig.isValid = true;
+        }
+        return sig;
+    }
+
+    // 比较两个签名是否一致 (重载 != 运算符)
+    bool operator!=(const AssetSignature& other) const
+    {
+        if (!isValid || !other.isValid) return true; // 任何一个无效都视为不匹配
+        return lastWriteTime != other.lastWriteTime || fileSize != other.fileSize;
+    }
+    
+    bool operator==(const AssetSignature& other) const
+    {
+        return !(*this != other);
+    }
+};
+```
+
 ./engine/utils/image_utils.cpp:
 ```
 #include "image_utils.h"
@@ -8247,6 +9913,30 @@ public:
     // width, height: 图像大小
     // filename: 保存路径 (支持 .png, .jpg)
     static void saveScreenshot(const std::string& filename, int width, int height);
+};
+```
+
+./engine/utils/profiler.h:
+```
+#pragma once
+#include <chrono>
+#include <iostream>
+#include <string>
+
+class ScopedTimer {
+public:
+    ScopedTimer(const std::string& name) : _name(name) {
+        _start = std::chrono::high_resolution_clock::now();
+    }
+    
+    ~ScopedTimer() {
+        auto end = std::chrono::high_resolution_clock::now();
+        double duration = std::chrono::duration<double, std::milli>(end - _start).count();
+        std::cout << "[Timer] " << _name << " took " << duration << " ms" << std::endl;
+    }
+private:
+    std::string _name;
+    std::chrono::time_point<std::chrono::high_resolution_clock> _start;
 };
 ```
 

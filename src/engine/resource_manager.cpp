@@ -1,5 +1,6 @@
 #include "resource_manager.h"
 #include "obj_loader.h"
+#include "gltf_loader.h"
 #include <iostream>
 #include <algorithm>
 #include <stb_image.h>
@@ -171,7 +172,24 @@ std::shared_ptr<SceneResource> ResourceManager::getSceneResource(const std::stri
 
     try {
         // 这将返回 raw CPU data (vector<SubMesh>)
-        std::vector<SubMesh> subMeshes = OBJLoader::loadScene(fullPath, useFlatShade);
+        std::vector<SubMesh> subMeshes;
+        
+        std::string ext = std::filesystem::path(fullPath).extension().string();
+        // 转小写
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+        if (ext == ".obj") {
+            subMeshes = OBJLoader::loadScene(fullPath, useFlatShade);
+        } 
+        else if (ext == ".gltf" || ext == ".glb") {
+            // GLTF 通常自带法线，如果需要在加载时重新计算 flat shade，可以在 loader 里加参数
+            // 目前 GLTFLoader 还没支持 useFlatShade 参数，我们暂时忽略它
+            subMeshes = GLTFLoader::loadScene(fullPath);
+        }
+        else {
+            std::cerr << "[ResourceManager] Unsupported format: " << ext << std::endl;
+            return nullptr;
+        }
         
         if (subMeshes.empty()) return nullptr;
 

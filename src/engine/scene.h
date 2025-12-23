@@ -62,7 +62,7 @@ public:
     void exportToOBJ(const std::string& filename);
 
     // 从 OBJ 导入场景（多个物体）
-    void importSceneFromOBJ(const std::string& filepath);
+    void importScene(const std::string& filepath);
     // 从 OBJ 导入单体
     void importSingleMeshFromOBJ(const std::string& filepath);
 
