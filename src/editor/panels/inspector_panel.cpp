@@ -403,9 +403,20 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 // [逻辑] 没有光源组件，正常显示编辑器
                 // PBR 参数滑块
                 ImGui::ColorEdit3("Albedo", glm::value_ptr(mesh->material.albedo));
-                if (mesh->ormMap)
+
+                bool hasAnyPBRMap = (mesh->ormMap != nullptr) || 
+                                    (mesh->roughnessMap != nullptr) || 
+                                    (mesh->metallicMap != nullptr) || 
+                                    (mesh->aoMap != nullptr);
+                
+                if (!hasAnyPBRMap)
                 {
-                    // 样式优化：显示一个稍微暗淡的提示信息
+                    ImGui::SliderFloat("Metallic", &mesh->material.metallic, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Roughness", &mesh->material.roughness, 0.0f, 1.0f);
+                    ImGui::SliderFloat("AO", &mesh->material.ao, 0.0f, 1.0f);
+                }
+                else
+                {
                     ImGui::Spacing();
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
                     ImGui::Text("[Physical Props Controlled by Texture]");
@@ -415,32 +426,22 @@ void InspectorPanel::drawComponentUI(Component *comp)
                     ImGui::PopStyleColor();
                     ImGui::Spacing();
                 }
-                else
-                {
-                    // 没有 ORM 贴图时，显示手动滑块
-                    ImGui::SliderFloat("Metallic", &mesh->material.metallic, 0.0f, 1.0f);
-                    ImGui::SliderFloat("Roughness", &mesh->material.roughness, 0.0f, 1.0f);
-                    ImGui::SliderFloat("AO", &mesh->material.ao, 0.0f, 1.0f);
-                }
             }
 
             // 纹理贴图设置 (Texture Map)
             ImGui::Spacing();
             ImGui::Separator();
         
-            std::string fullPath = mesh->diffuseMap ? mesh->diffuseMap->getUri() : "";
-            std::string fileName = std::filesystem::path(fullPath).filename().string();
+            // 1. Albedo
+            std::string albedoPath = mesh->diffuseMap ? mesh->diffuseMap->getUri() : "";
+            std::string albedoName = std::filesystem::path(albedoPath).filename().string();
 
-            drawResourceSlot("Albedo Map", fileName, fullPath, "ASSET_TEXTURE",
-                // OnDrop
+            drawResourceSlot("Albedo Map", albedoName, albedoPath, "ASSET_TEXTURE",
                 [&](const std::string& path) {
                     auto tex = ResourceManager::Get().getTexture(path);
                     if (tex) mesh->diffuseMap = tex;
                 },
-                // OnClear
-                [&]() {
-                    mesh->diffuseMap = nullptr;
-                }
+                [&]() { mesh->diffuseMap = nullptr; }
             );
 
             if (mesh->diffuseMap) // 只有有纹理时才显示这些选项
@@ -541,6 +542,7 @@ void InspectorPanel::drawComponentUI(Component *comp)
 
             ImGui::Separator();
 
+            // 2. Normal
             std::string normPath = mesh->normalMap ? mesh->normalMap->getUri() : "";
             std::string normName = std::filesystem::path(normPath).filename().string();
 
@@ -568,6 +570,7 @@ void InspectorPanel::drawComponentUI(Component *comp)
 
             ImGui::Separator();
 
+            // 4. ORM (Packed)
             std::string ormPath = mesh->ormMap ? mesh->ormMap->getUri() : "";
             std::string ormName = std::filesystem::path(ormPath).filename().string();
 
@@ -580,14 +583,55 @@ void InspectorPanel::drawComponentUI(Component *comp)
             );
 
             if (mesh->ormMap) {
-                // 如果有贴图，提示用户滑块将失效或作为乘数
-                // 现代做法通常是：有贴图时，贴图完全接管。
-                // 可以在这里加个 Tooltip 解释 R=AO, G=Rough, B=Metal
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Packed Texture:\nRed = Occlusion\nGreen = Roughness\nBlue = Metallic");
-                }
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f)); // 灰色
+                ImGui::Text("   Format: R=Occlusion, G=Roughness, B=Metallic");
+                ImGui::PopStyleColor();
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f)); // 更暗的灰色
+                ImGui::Text("   (R=AO, G=Rough, B=Metal)");
+                ImGui::PopStyleColor();
             }
 
+            ImGui::Separator();
+
+            ImGui::Text("Channel Overrides");
+            ImGui::SameLine();
+            ImGui::TextDisabled("(Higher Priority)");
+
+            // --- Metallic ---
+            std::string metalPath = mesh->metallicMap ? mesh->metallicMap->getUri() : "";
+            std::string metalName = std::filesystem::path(metalPath).filename().string();
+            drawResourceSlot("Metallic Map", metalName, metalPath, "ASSET_TEXTURE",
+                [&](const std::string& path) { mesh->metallicMap = ResourceManager::Get().getTexture(path); },
+                [&]() { mesh->metallicMap = nullptr; }
+            );
+            // 如果有贴图，显示黄色警告；如果没有，显示灰色提示
+            if (mesh->metallicMap) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "   [!] Overrides ORM Blue & Slider");
+            } 
+
+            // --- Roughness ---
+            std::string roughPath = mesh->roughnessMap ? mesh->roughnessMap->getUri() : "";
+            std::string roughName = std::filesystem::path(roughPath).filename().string();
+            drawResourceSlot("Roughness Map", roughName, roughPath, "ASSET_TEXTURE",
+                [&](const std::string& path) { mesh->roughnessMap = ResourceManager::Get().getTexture(path); },
+                [&]() { mesh->roughnessMap = nullptr; }
+            );
+            if (mesh->roughnessMap) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "   [!] Overrides ORM Green & Slider");
+            }
+
+            // --- AO ---
+            std::string aoPath = mesh->aoMap ? mesh->aoMap->getUri() : "";
+            std::string aoName = std::filesystem::path(aoPath).filename().string();
+            drawResourceSlot("AO Map", aoName, aoPath, "ASSET_TEXTURE",
+                [&](const std::string& path) { mesh->aoMap = ResourceManager::Get().getTexture(path); },
+                [&]() { mesh->aoMap = nullptr; }
+            );
+            if (mesh->aoMap) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "   [!] Overrides ORM Red & Slider");
+            }
+            
             ImGui::Separator();
 
             std::string emissivePath = mesh->emissiveMap ? mesh->emissiveMap->getUri() : "";

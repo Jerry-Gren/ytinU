@@ -396,7 +396,7 @@ void SceneRoaming::setupDockspace()
 
     // 如果需要重置，或者第一次运行且没有 ini 记录
     // (ImGui::DockBuilderGetNode 判断该 ID 是否已存在)
-    if (!_isLayoutInitialized || (ImGui::DockBuilderGetNode(dockspace_id) == NULL))
+    if (!_isLayoutInitialized)
     {
         // 1. 清除当前所有布局
         ImGui::DockBuilderRemoveNode(dockspace_id); 
@@ -1466,6 +1466,7 @@ private:
 #include "engine/resource_manager.h"
 #include <filesystem>
 #include <iostream>
+#include <imgui_internal.h>
 
 void EditorStyle::init(float contentScale) {
     // 1. 加载字体
@@ -1507,93 +1508,170 @@ void EditorStyle::applyTheme() {
     ImGuiStyle* style = &ImGui::GetStyle();
     ImVec4* colors = style->Colors;
 
-    // --- 样式变量 (这是让 UI 看起来“现代”的关键) ---
-    style->WindowRounding    = 6.0f; // 窗口圆角
-    style->ChildRounding     = 4.0f; // 子窗口圆角
-    style->FrameRounding     = 4.0f; // 按钮/输入框圆角
-    style->GrabRounding      = 4.0f; // 滑块圆角
-    style->PopupRounding     = 4.0f; // 弹出菜单圆角
-    style->ScrollbarRounding = 4.0f; // 滚动条圆角
-    style->TabRounding       = 4.0f; // 标签页圆角
+    // =========================================================
+    // 1. 布局与尺寸 (Layout & Sizes)
+    // =========================================================
+    // 这种设置让 UI 看起来更像生产力工具，而不是 Debug 菜单
+    
+    // 圆角：现代 UI 倾向于小圆角，主窗口通常无圆角以最大化拼接
+    style->WindowRounding    = 4.0f; 
+    style->ChildRounding     = 4.0f;
+    style->FrameRounding     = 4.0f; // 输入框和按钮的圆角
+    style->GrabRounding      = 3.0f; // 滑块抓手的圆角
+    style->PopupRounding     = 4.0f;
+    style->ScrollbarRounding = 12.0f; // 胶囊型滚动条
+    style->TabRounding       = 4.0f;
 
+    // 边框：扁平化设计通常只需要极细的边框
     style->WindowBorderSize  = 1.0f; 
-    style->FrameBorderSize   = 0.0f; // 扁平化，不要边框
+    style->ChildBorderSize   = 1.0f;
     style->PopupBorderSize   = 1.0f;
+    style->FrameBorderSize   = 0.0f; // 输入框默认无边框，靠背景色区分
+    style->TabBorderSize     = 0.0f;
 
-    style->WindowPadding     = ImVec2(8, 8);
-    style->FramePadding      = ImVec2(5, 4); // 让按钮高一点，不要太挤
-    style->ItemSpacing       = ImVec2(8, 4);
-    style->ItemInnerSpacing  = ImVec2(4, 4);
-    style->IndentSpacing     = 20.0f;
-    style->ScrollbarSize     = 14.0f;
+    // 间距：让 UI 呼吸感更强
+    style->WindowPadding     = ImVec2(10.0f, 10.0f);
+    style->FramePadding      = ImVec2(5.0f, 5.0f);      // 让按钮和输入框稍微高一点
+    style->ItemSpacing       = ImVec2(8.0f, 6.0f);      // 控件之间的垂直间距稍大
+    style->ItemInnerSpacing  = ImVec2(6.0f, 4.0f);
+    style->IndentSpacing     = 20.0f;                   // 树状列表缩进
+    style->ScrollbarSize     = 14.0f;                   // 稍微宽一点的滚动条，易于点击
+    style->GrabMinSize       = 12.0f;
 
-    // --- 配色方案 (深灰色调 + 蓝色高亮) ---
-    // 基础背景
-    colors[ImGuiCol_Text]                   = ImVec4(0.90f, 0.90f, 0.90f, 1.00f);
-    colors[ImGuiCol_TextDisabled]           = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
-    colors[ImGuiCol_WindowBg]               = ImVec4(0.12f, 0.12f, 0.12f, 1.00f); // 稍微亮一点的深灰
-    colors[ImGuiCol_ChildBg]                = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    colors[ImGuiCol_PopupBg]                = ImVec4(0.15f, 0.15f, 0.15f, 0.94f);
-    colors[ImGuiCol_Border]                 = ImVec4(0.25f, 0.25f, 0.25f, 0.50f);
-    colors[ImGuiCol_BorderShadow]           = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    // 标题栏对齐
+    style->WindowTitleAlign  = ImVec2(0.5f, 0.5f);      // 居中标题
+    style->ButtonTextAlign   = ImVec2(0.5f, 0.5f);
+
+    // =========================================================
+    // 2. 配色方案 (Color Palette) - "Deep Dark Professional"
+    // =========================================================
     
+    // 基础色调定义 (方便微调)
+    const ImVec4 col_text_main      = ImVec4(0.90f, 0.90f, 0.93f, 1.00f); // 略带冷色的白
+    const ImVec4 col_text_disabled  = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
+    
+    const ImVec4 col_win_bg         = ImVec4(0.12f, 0.12f, 0.12f, 1.00f); // 主窗口背景 #1F1F1F
+    const ImVec4 col_child_bg       = ImVec4(0.15f, 0.15f, 0.15f, 1.00f); // 子面板背景
+    const ImVec4 col_popup_bg       = ImVec4(0.12f, 0.12f, 0.12f, 0.98f); // 弹出层背景
+    
+    const ImVec4 col_border         = ImVec4(0.25f, 0.25f, 0.25f, 0.50f); // 极淡的边框
+    const ImVec4 col_border_shadow  = ImVec4(0.00f, 0.00f, 0.00f, 0.00f); // 现代 UI 很少用硬阴影
+
+    // 控件背景 (输入框、滑块槽) - 比背景色更深，形成凹陷感
+    const ImVec4 col_frame_bg       = ImVec4(0.08f, 0.08f, 0.08f, 1.00f); 
+    const ImVec4 col_frame_hover    = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
+    const ImVec4 col_frame_active   = ImVec4(0.18f, 0.18f, 0.18f, 1.00f);
+
+    // 标题栏 (Title Bar) - 沉浸式
+    const ImVec4 col_title_bg       = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
+    const ImVec4 col_title_active   = ImVec4(0.10f, 0.10f, 0.10f, 1.00f); // 激活时不改变颜色，避免闪烁
+    const ImVec4 col_title_collapse = ImVec4(0.00f, 0.00f, 0.00f, 0.51f);
+
+    // 核心强调色 (Accent Color) - 类似 UE5 的科技蓝
+    // 如果你喜欢 Blender 风格，可以把这里改为橙色系 (e.g. 0.9f, 0.45f, 0.1f)
+    const ImVec4 col_accent         = ImVec4(0.16f, 0.48f, 0.82f, 1.00f); // #297BD1
+    const ImVec4 col_accent_hover   = ImVec4(0.22f, 0.58f, 0.95f, 1.00f);
+    const ImVec4 col_accent_active  = ImVec4(0.12f, 0.40f, 0.70f, 1.00f);
+
+    // 按钮 (Button) - 默认深灰色，不抢眼
+    const ImVec4 col_btn            = ImVec4(0.22f, 0.22f, 0.22f, 1.00f);
+    const ImVec4 col_btn_hover      = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
+    const ImVec4 col_btn_active     = ImVec4(0.18f, 0.18f, 0.18f, 1.00f);
+
+    // 标签页 (Tabs) - 关键在于非激活状态要“退后”，激活状态要“对齐”
+    const ImVec4 col_tab            = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
+    const ImVec4 col_tab_hover      = ImVec4(0.24f, 0.24f, 0.24f, 1.00f);
+    const ImVec4 col_tab_active     = col_child_bg; // 激活的 Tab 应该和 ChildBg 融为一体
+    const ImVec4 col_tab_unfocused  = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
+    const ImVec4 col_tab_unfocused_active = col_child_bg;
+
+    // --- 应用颜色 ---
+    
+    // 文本
+    colors[ImGuiCol_Text]                   = col_text_main;
+    colors[ImGuiCol_TextDisabled]           = col_text_disabled;
+    colors[ImGuiCol_TextSelectedBg]         = ImVec4(col_accent.x, col_accent.y, col_accent.z, 0.40f);
+
+    // 窗口与背景
+    colors[ImGuiCol_WindowBg]               = col_win_bg;
+    colors[ImGuiCol_ChildBg]                = col_child_bg;
+    colors[ImGuiCol_PopupBg]                = col_popup_bg;
+    colors[ImGuiCol_Border]                 = col_border;
+    colors[ImGuiCol_BorderShadow]           = col_border_shadow;
+
+    // 输入框与Frame
+    colors[ImGuiCol_FrameBg]                = col_frame_bg;
+    colors[ImGuiCol_FrameBgHovered]         = col_frame_hover;
+    colors[ImGuiCol_FrameBgActive]          = col_frame_active;
+
     // 标题栏
-    colors[ImGuiCol_TitleBg]                = ImVec4(0.08f, 0.08f, 0.08f, 1.00f);
-    colors[ImGuiCol_TitleBgActive]          = ImVec4(0.08f, 0.08f, 0.08f, 1.00f); // 激活时不改变颜色，更扁平
-    colors[ImGuiCol_TitleBgCollapsed]       = ImVec4(0.00f, 0.00f, 0.00f, 0.51f);
-    colors[ImGuiCol_MenuBarBg]              = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
+    colors[ImGuiCol_TitleBg]                = col_title_bg;
+    colors[ImGuiCol_TitleBgActive]          = col_title_active;
+    colors[ImGuiCol_TitleBgCollapsed]       = col_title_collapse;
+    colors[ImGuiCol_MenuBarBg]              = col_title_bg;
 
-    // 滚动条
-    colors[ImGuiCol_ScrollbarBg]            = ImVec4(0.02f, 0.02f, 0.02f, 0.53f);
-    colors[ImGuiCol_ScrollbarGrab]          = ImVec4(0.31f, 0.31f, 0.31f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabHovered]   = ImVec4(0.41f, 0.41f, 0.41f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabActive]    = ImVec4(0.51f, 0.51f, 0.51f, 1.00f);
+    // 滚动条 (更加极简)
+    colors[ImGuiCol_ScrollbarBg]            = ImVec4(0.02f, 0.02f, 0.02f, 0.00f); // 透明背景
+    colors[ImGuiCol_ScrollbarGrab]          = ImVec4(0.35f, 0.35f, 0.35f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabHovered]   = ImVec4(0.45f, 0.45f, 0.45f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrabActive]    = ImVec4(0.55f, 0.55f, 0.55f, 1.00f);
 
-    // 核心交互元素 (Checkmark, Slider) - 使用柔和的蓝色
-    colors[ImGuiCol_CheckMark]              = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
-    colors[ImGuiCol_SliderGrab]             = ImVec4(0.26f, 0.59f, 0.98f, 0.78f);
-    colors[ImGuiCol_SliderGrabActive]       = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
+    // 核心交互元素 (Checkmark, Slider, Drag) - 使用强调色
+    colors[ImGuiCol_CheckMark]              = col_accent;
+    colors[ImGuiCol_SliderGrab]             = col_accent;
+    colors[ImGuiCol_SliderGrabActive]       = col_accent_active;
 
-    // 按钮 (Button)
-    colors[ImGuiCol_Button]                 = ImVec4(0.24f, 0.24f, 0.24f, 1.00f); // 默认深灰
-    colors[ImGuiCol_ButtonHovered]          = ImVec4(0.30f, 0.30f, 0.30f, 1.00f); // 悬停变亮
-    colors[ImGuiCol_ButtonActive]           = ImVec4(0.20f, 0.20f, 0.20f, 1.00f); // 按下变暗
+    // 按钮
+    colors[ImGuiCol_Button]                 = col_btn;
+    colors[ImGuiCol_ButtonHovered]          = col_btn_hover;
+    colors[ImGuiCol_ButtonActive]           = col_btn_active;
 
-    // Header (TreeNode, Selectable)
-    colors[ImGuiCol_Header]                 = ImVec4(0.26f, 0.59f, 0.98f, 0.31f);
-    colors[ImGuiCol_HeaderHovered]          = ImVec4(0.26f, 0.59f, 0.98f, 0.50f);
-    colors[ImGuiCol_HeaderActive]           = ImVec4(0.26f, 0.59f, 0.98f, 0.80f);
+    // Header (TreeNode, Selectable) - 类似资源管理器
+    // 这里的颜色不宜太亮，否则 Hierarchy 会显得很乱
+    colors[ImGuiCol_Header]                 = ImVec4(col_accent.x, col_accent.y, col_accent.z, 0.20f); // 淡淡的选中色
+    colors[ImGuiCol_HeaderHovered]          = ImVec4(col_accent.x, col_accent.y, col_accent.z, 0.35f);
+    colors[ImGuiCol_HeaderActive]           = ImVec4(col_accent.x, col_accent.y, col_accent.z, 0.50f);
 
-    // Separator / Resize Grip
-    colors[ImGuiCol_Separator]              = ImVec4(0.30f, 0.30f, 0.30f, 0.50f);
-    colors[ImGuiCol_SeparatorHovered]       = ImVec4(0.10f, 0.40f, 0.75f, 0.78f);
-    colors[ImGuiCol_SeparatorActive]        = ImVec4(0.10f, 0.40f, 0.75f, 1.00f);
-    colors[ImGuiCol_ResizeGrip]             = ImVec4(0.26f, 0.59f, 0.98f, 0.20f);
-    colors[ImGuiCol_ResizeGripHovered]      = ImVec4(0.26f, 0.59f, 0.98f, 0.67f);
-    colors[ImGuiCol_ResizeGripActive]       = ImVec4(0.26f, 0.59f, 0.98f, 0.95f);
+    // 分隔线 (Separator)
+    colors[ImGuiCol_Separator]              = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
+    colors[ImGuiCol_SeparatorHovered]       = col_accent;
+    colors[ImGuiCol_SeparatorActive]        = col_accent_active;
+    
+    // 调整手柄 (Resize Grip)
+    colors[ImGuiCol_ResizeGrip]             = ImVec4(col_accent.x, col_accent.y, col_accent.z, 0.20f);
+    colors[ImGuiCol_ResizeGripHovered]      = ImVec4(col_accent.x, col_accent.y, col_accent.z, 0.60f);
+    colors[ImGuiCol_ResizeGripActive]       = ImVec4(col_accent.x, col_accent.y, col_accent.z, 0.90f);
 
-    // Tabs
-    colors[ImGuiCol_Tab]                    = ImVec4(0.18f, 0.18f, 0.18f, 0.86f);
-    colors[ImGuiCol_TabHovered]             = ImVec4(0.26f, 0.59f, 0.98f, 0.80f);
-    colors[ImGuiCol_TabActive]              = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-    colors[ImGuiCol_TabUnfocused]           = ImVec4(0.07f, 0.10f, 0.15f, 0.97f);
-    colors[ImGuiCol_TabUnfocusedActive]     = ImVec4(0.14f, 0.14f, 0.14f, 1.00f);
+    // 标签页 (Tabs)
+    colors[ImGuiCol_Tab]                    = col_tab;
+    colors[ImGuiCol_TabHovered]             = col_tab_hover;
+    colors[ImGuiCol_TabActive]              = col_tab_active;
+    colors[ImGuiCol_TabUnfocused]           = col_tab_unfocused;
+    colors[ImGuiCol_TabUnfocusedActive]     = col_tab_unfocused_active;
 
-    // Docking
-    colors[ImGuiCol_DockingPreview]         = ImVec4(0.26f, 0.59f, 0.98f, 0.70f);
+    // 停靠 (Docking)
+    colors[ImGuiCol_DockingPreview]         = ImVec4(col_accent.x, col_accent.y, col_accent.z, 0.70f); // 拖拽时的预览色
     colors[ImGuiCol_DockingEmptyBg]         = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-    
-    // Plot
-    colors[ImGuiCol_PlotLines]              = ImVec4(0.61f, 0.61f, 0.61f, 1.00f);
-    colors[ImGuiCol_PlotLinesHovered]       = ImVec4(1.00f, 0.43f, 0.35f, 1.00f);
-    colors[ImGuiCol_PlotHistogram]          = ImVec4(0.90f, 0.70f, 0.00f, 1.00f);
-    colors[ImGuiCol_PlotHistogramHovered]   = ImVec4(1.00f, 0.60f, 0.00f, 1.00f);
-    
-    // Nav
-    colors[ImGuiCol_NavHighlight]           = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
+
+    // 图表 (Plot / Graph)
+    colors[ImGuiCol_PlotLines]              = col_text_main;
+    colors[ImGuiCol_PlotLinesHovered]       = col_accent;
+    colors[ImGuiCol_PlotHistogram]          = col_accent;
+    colors[ImGuiCol_PlotHistogramHovered]   = col_accent_hover;
+
+    // 表格 (Table) - 现代 UI 必备
+    colors[ImGuiCol_TableHeaderBg]          = ImVec4(0.18f, 0.18f, 0.18f, 1.00f);
+    colors[ImGuiCol_TableBorderStrong]      = ImVec4(0.25f, 0.25f, 0.25f, 0.50f);
+    colors[ImGuiCol_TableBorderLight]       = ImVec4(0.25f, 0.25f, 0.25f, 0.20f);
+    colors[ImGuiCol_TableRowBg]             = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    colors[ImGuiCol_TableRowBgAlt]          = ImVec4(1.00f, 1.00f, 1.00f, 0.02f); // 极淡的斑马纹
+
+    // 拖放导航
+    colors[ImGuiCol_DragDropTarget]         = ImVec4(1.00f, 0.80f, 0.00f, 0.90f); // 鲜艳的黄色提示
+    colors[ImGuiCol_NavHighlight]           = col_accent; // 键盘导航高亮
     colors[ImGuiCol_NavWindowingHighlight]  = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
     colors[ImGuiCol_NavWindowingDimBg]      = ImVec4(0.80f, 0.80f, 0.80f, 0.20f);
-    colors[ImGuiCol_ModalWindowDimBg]       = ImVec4(0.80f, 0.80f, 0.80f, 0.35f);
+    colors[ImGuiCol_ModalWindowDimBg]       = ImVec4(0.00f, 0.00f, 0.00f, 0.60f); // 模态窗口背后的遮罩更黑
 }
 ```
 
@@ -1716,6 +1794,7 @@ public:
 ```
 #include "hierarchy_panel.h"
 #include <imgui.h>
+#include <imgui_internal.h>
 
 HierarchyPanel::HierarchyPanel() : Panel("Scene Hierarchy") {}
 
@@ -1723,48 +1802,146 @@ void HierarchyPanel::onImGuiRender(const std::unique_ptr<Scene>& scene, GameObje
 {
     if (!_isOpen) return;
 
-    // 注意：ImGui::Begin 需要传入指针来控制关闭按钮
+    // [还原] 不再强制去除 WindowPadding，直接使用 EditorStyle 中定义的全局 Padding
+    // 这样 Hierarchy 面板的边缘间距将与其他面板（如 Inspector）完全一致
     if (!ImGui::Begin(_title.c_str(), &_isOpen)) {
         ImGui::End();
         return;
     }
 
-    // 1. 添加物体按钮
-    if (ImGui::Button("+ Add Object"))
-        ImGui::OpenPopup("AddObjPopup");
-    
-    if (ImGui::BeginPopup("AddObjPopup"))
+    // =========================================================
+    // 1. 顶部工具栏
+    // =========================================================
     {
-        if (ImGui::MenuItem("Cube")) {
-            scene->createCube(); 
+        // [还原] 不再需要手动 SetCursorPos，ImGui 会自动根据 WindowPadding 放置起始位置
+        
+        if (ImGui::Button("+ Add Object")) {
+            ImGui::OpenPopup("AddObjPopup_Toolbar");
         }
-        if (ImGui::MenuItem("Point Light")) {
-            scene->createPointLight();
-        }
+
+        ImGui::SameLine();
+        
+        // 自动计算剩余宽度
+        float availWidth = ImGui::GetContentRegionAvail().x; 
+        ImGui::SetNextItemWidth(availWidth);
+        
+        static char searchBuf[64] = "";
+        ImGui::InputTextWithHint("##Search", "Search...", searchBuf, sizeof(searchBuf));
+
+        // 分割线
+        ImGui::Separator();
+    }
+
+    if (ImGui::BeginPopup("AddObjPopup_Toolbar"))
+    {
+        if (ImGui::MenuItem("Cube")) scene->createCube(); 
+        if (ImGui::MenuItem("Point Light")) scene->createPointLight();
         ImGui::EndPopup();
     }
 
-    ImGui::Separator();
-
-    // 2. 遍历物体列表
-    const auto& objects = scene->getGameObjects();
+    // =========================================================
+    // 2. Hierarchy 列表 (Table)
+    // =========================================================
     
-    for (int i = 0; i < objects.size(); ++i)
+    // PadOuterX: 依然保留，让斑马纹背景左右稍微延伸一点点，视觉上更柔和
+    static ImGuiTableFlags table_flags = 
+        ImGuiTableFlags_Resizable | 
+        ImGuiTableFlags_RowBg | 
+        ImGuiTableFlags_ScrollY | 
+        ImGuiTableFlags_NoBordersInBody |
+        ImGuiTableFlags_PadOuterX;
+
+    // [保留垂直修正] 仅保留垂直方向的 CellPadding，用于解决你之前提到的“文字重叠”问题
+    // 水平方向(X)设为 4.0f (标准值)，因为现在外部已经有 WindowPadding 了，不需要额外的缩进
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(4.0f, 4.0f));
+
+    // 计算表格高度：-1 表示占据剩余所有空间
+    // 之前可能因为 WindowPadding=0 导致布局计算复杂，现在可以直接传 ImVec2(0, 0)
+    if (ImGui::BeginTable("HierarchyTable", 2, table_flags))
     {
-        auto &go = objects[i];
+        // 表头
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_NoHide | ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 60.0f);
         
-        // 使用 Selectable 模拟列表项
-        ImGui::PushID(go->getInstanceID());
-        if (ImGui::Selectable(go->name.c_str(), selectedObject == go.get()))
+        // --- 遍历物体 ---
+        const auto& objects = scene->getGameObjects();
+        int idToDelete = -1;
+
+        for (int i = 0; i < objects.size(); ++i)
         {
-            selectedObject = go.get();
+            auto &go = objects[i];
+            
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+
+            ImGui::PushID(go->getInstanceID());
+
+            // SpanAllColumns: 依然保留，让选中高亮条横跨整个表格
+            ImGuiSelectableFlags selectable_flags = ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap;
+
+            bool isSelected = (selectedObject == go.get());
+            
+            // 垂直居中对齐
+            ImGui::AlignTextToFramePadding();
+
+            // 绘制行
+            if (ImGui::Selectable(go->name.c_str(), isSelected, selectable_flags))
+            {
+                selectedObject = go.get();
+            }
+
+            // 右键菜单
+            if (ImGui::BeginPopupContextItem())
+            {
+                selectedObject = go.get();
+                if (ImGui::MenuItem("Delete")) {
+                    idToDelete = i;
+                }
+                ImGui::Separator();
+                ImGui::MenuItem("Duplicate (TODO)", nullptr, false, false);
+                ImGui::EndPopup();
+            }
+
+            // 第二列：类型
+            ImGui::TableSetColumnIndex(1);
+            ImGui::AlignTextToFramePadding(); 
+
+            const char* typeStr = "-";
+            if (go->getComponent<LightComponent>()) typeStr = "Light";
+            else if (go->getComponent<MeshComponent>()) typeStr = "Mesh";
+            else if (go->getComponent<ReflectionProbeComponent>()) typeStr = "Probe";
+
+            ImGui::TextDisabled("%s", typeStr);
+
+            ImGui::PopID();
         }
-        ImGui::PopID();
+
+        if (idToDelete != -1) {
+            scene->markForDestruction(objects[idToDelete].get());
+            if (selectedObject == objects[idToDelete].get()) selectedObject = nullptr;
+        }
+
+        ImGui::EndTable();
+    }
+    
+    ImGui::PopStyleVar(); // Pop CellPadding
+
+    // =========================================================
+    // 3. 空白处交互
+    // =========================================================
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemHovered()) {
+        selectedObject = nullptr;
     }
 
-    // 3. 点击空白处取消选择
-    if (ImGui::IsMouseDown(0) && ImGui::IsWindowHovered())
-        selectedObject = nullptr;
+    if (ImGui::BeginPopupContextWindow("HierarchyContext", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems))
+    {
+        ImGui::TextDisabled("Create Asset");
+        ImGui::Separator();
+        if (ImGui::MenuItem("Cube")) scene->createCube(); 
+        ImGui::Separator();
+        if (ImGui::MenuItem("Point Light")) scene->createPointLight();
+        ImGui::EndPopup();
+    }
 
     ImGui::End();
 }
@@ -1828,7 +2005,6 @@ void InspectorPanel::onImGuiRender(GameObject*& selectedObject, Scene* sceneCont
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1));
         bool shouldDeleteObj = ImGui::Button(btnLabel, ImVec2(btnWidth, 0));
         ImGui::PopStyleColor();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete Object");
 
         if (shouldDeleteObj && sceneContext)
         {
@@ -2197,9 +2373,20 @@ void InspectorPanel::drawComponentUI(Component *comp)
                 // [逻辑] 没有光源组件，正常显示编辑器
                 // PBR 参数滑块
                 ImGui::ColorEdit3("Albedo", glm::value_ptr(mesh->material.albedo));
-                if (mesh->ormMap)
+
+                bool hasAnyPBRMap = (mesh->ormMap != nullptr) || 
+                                    (mesh->roughnessMap != nullptr) || 
+                                    (mesh->metallicMap != nullptr) || 
+                                    (mesh->aoMap != nullptr);
+                
+                if (!hasAnyPBRMap)
                 {
-                    // 样式优化：显示一个稍微暗淡的提示信息
+                    ImGui::SliderFloat("Metallic", &mesh->material.metallic, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Roughness", &mesh->material.roughness, 0.0f, 1.0f);
+                    ImGui::SliderFloat("AO", &mesh->material.ao, 0.0f, 1.0f);
+                }
+                else
+                {
                     ImGui::Spacing();
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
                     ImGui::Text("[Physical Props Controlled by Texture]");
@@ -2209,32 +2396,22 @@ void InspectorPanel::drawComponentUI(Component *comp)
                     ImGui::PopStyleColor();
                     ImGui::Spacing();
                 }
-                else
-                {
-                    // 没有 ORM 贴图时，显示手动滑块
-                    ImGui::SliderFloat("Metallic", &mesh->material.metallic, 0.0f, 1.0f);
-                    ImGui::SliderFloat("Roughness", &mesh->material.roughness, 0.0f, 1.0f);
-                    ImGui::SliderFloat("AO", &mesh->material.ao, 0.0f, 1.0f);
-                }
             }
 
             // 纹理贴图设置 (Texture Map)
             ImGui::Spacing();
             ImGui::Separator();
         
-            std::string fullPath = mesh->diffuseMap ? mesh->diffuseMap->getUri() : "";
-            std::string fileName = std::filesystem::path(fullPath).filename().string();
+            // 1. Albedo
+            std::string albedoPath = mesh->diffuseMap ? mesh->diffuseMap->getUri() : "";
+            std::string albedoName = std::filesystem::path(albedoPath).filename().string();
 
-            drawResourceSlot("Albedo Map", fileName, fullPath, "ASSET_TEXTURE",
-                // OnDrop
+            drawResourceSlot("Albedo Map", albedoName, albedoPath, "ASSET_TEXTURE",
                 [&](const std::string& path) {
                     auto tex = ResourceManager::Get().getTexture(path);
                     if (tex) mesh->diffuseMap = tex;
                 },
-                // OnClear
-                [&]() {
-                    mesh->diffuseMap = nullptr;
-                }
+                [&]() { mesh->diffuseMap = nullptr; }
             );
 
             if (mesh->diffuseMap) // 只有有纹理时才显示这些选项
@@ -2335,6 +2512,7 @@ void InspectorPanel::drawComponentUI(Component *comp)
 
             ImGui::Separator();
 
+            // 2. Normal
             std::string normPath = mesh->normalMap ? mesh->normalMap->getUri() : "";
             std::string normName = std::filesystem::path(normPath).filename().string();
 
@@ -2362,6 +2540,7 @@ void InspectorPanel::drawComponentUI(Component *comp)
 
             ImGui::Separator();
 
+            // 4. ORM (Packed)
             std::string ormPath = mesh->ormMap ? mesh->ormMap->getUri() : "";
             std::string ormName = std::filesystem::path(ormPath).filename().string();
 
@@ -2374,14 +2553,55 @@ void InspectorPanel::drawComponentUI(Component *comp)
             );
 
             if (mesh->ormMap) {
-                // 如果有贴图，提示用户滑块将失效或作为乘数
-                // 现代做法通常是：有贴图时，贴图完全接管。
-                // 可以在这里加个 Tooltip 解释 R=AO, G=Rough, B=Metal
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Packed Texture:\nRed = Occlusion\nGreen = Roughness\nBlue = Metallic");
-                }
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f)); // 灰色
+                ImGui::Text("   Format: R=Occlusion, G=Roughness, B=Metallic");
+                ImGui::PopStyleColor();
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f)); // 更暗的灰色
+                ImGui::Text("   (R=AO, G=Rough, B=Metal)");
+                ImGui::PopStyleColor();
             }
 
+            ImGui::Separator();
+
+            ImGui::Text("Channel Overrides");
+            ImGui::SameLine();
+            ImGui::TextDisabled("(Higher Priority)");
+
+            // --- Metallic ---
+            std::string metalPath = mesh->metallicMap ? mesh->metallicMap->getUri() : "";
+            std::string metalName = std::filesystem::path(metalPath).filename().string();
+            drawResourceSlot("Metallic Map", metalName, metalPath, "ASSET_TEXTURE",
+                [&](const std::string& path) { mesh->metallicMap = ResourceManager::Get().getTexture(path); },
+                [&]() { mesh->metallicMap = nullptr; }
+            );
+            // 如果有贴图，显示黄色警告；如果没有，显示灰色提示
+            if (mesh->metallicMap) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "   [!] Overrides ORM Blue & Slider");
+            } 
+
+            // --- Roughness ---
+            std::string roughPath = mesh->roughnessMap ? mesh->roughnessMap->getUri() : "";
+            std::string roughName = std::filesystem::path(roughPath).filename().string();
+            drawResourceSlot("Roughness Map", roughName, roughPath, "ASSET_TEXTURE",
+                [&](const std::string& path) { mesh->roughnessMap = ResourceManager::Get().getTexture(path); },
+                [&]() { mesh->roughnessMap = nullptr; }
+            );
+            if (mesh->roughnessMap) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "   [!] Overrides ORM Green & Slider");
+            }
+
+            // --- AO ---
+            std::string aoPath = mesh->aoMap ? mesh->aoMap->getUri() : "";
+            std::string aoName = std::filesystem::path(aoPath).filename().string();
+            drawResourceSlot("AO Map", aoName, aoPath, "ASSET_TEXTURE",
+                [&](const std::string& path) { mesh->aoMap = ResourceManager::Get().getTexture(path); },
+                [&]() { mesh->aoMap = nullptr; }
+            );
+            if (mesh->aoMap) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "   [!] Overrides ORM Red & Slider");
+            }
+            
             ImGui::Separator();
 
             std::string emissivePath = mesh->emissiveMap ? mesh->emissiveMap->getUri() : "";
@@ -2854,6 +3074,8 @@ void SceneViewPanel::resizeFBO(int width, int height)
 // [修改后的签名]
 void SceneViewPanel::onImGuiRender(Scene* scene, Renderer* renderer, GameObject*& selectedObject, float contentScale)
 {
+    if (!_isOpen) return;
+
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f)); 
     if (!ImGui::Begin(_title.c_str(), &_isOpen)) {
         ImGui::End(); ImGui::PopStyleVar(); return;
@@ -2911,33 +3133,37 @@ void SceneViewPanel::onInputUpdate(float dt, Scene* scene, GameObject*& selected
 
     _isControlling = _cameraController->isControlling();
 
-    // 快捷键 (F 聚焦)
-    // 这里需要 GLFW 窗口句柄来检测按键吗？ ImGui 提供了 IsKeyPressed
-    if (ImGui::IsKeyPressed(ImGuiKey_F)) {
-        _cameraController->frameObject(selectedObject);
-    }
-    
-    // Key 1: Front View (+Z)
-    if (ImGui::IsKeyPressed(ImGuiKey_1) || ImGui::IsKeyPressed(ImGuiKey_Keypad1)) {
-        _cameraController->switchToView(glm::vec3(0, 0, 1));
-    }
-    // Key 3: Right View (+X)
-    if (ImGui::IsKeyPressed(ImGuiKey_3) || ImGui::IsKeyPressed(ImGuiKey_Keypad3)) {
-        _cameraController->switchToView(glm::vec3(1, 0, 0));
-    }
-    // Key 7: Top View (+Y)
-    if (ImGui::IsKeyPressed(ImGuiKey_7) || ImGui::IsKeyPressed(ImGuiKey_Keypad7)) {
-        _cameraController->switchToView(glm::vec3(0, 1, 0));
+    bool isHotKeyActive = _isHovered || _isFocused;
+
+    if (isHotKeyActive) {
+        // 快捷键 (F 聚焦)
+        // 这里需要 GLFW 窗口句柄来检测按键吗？ ImGui 提供了 IsKeyPressed
+        if (ImGui::IsKeyPressed(ImGuiKey_F)) {
+            _cameraController->frameObject(selectedObject);
+        }
+        
+        // Key 1: Front View (+Z)
+        if (ImGui::IsKeyPressed(ImGuiKey_1) || ImGui::IsKeyPressed(ImGuiKey_Keypad1)) {
+            _cameraController->switchToView(glm::vec3(0, 0, 1));
+        }
+        // Key 3: Right View (+X)
+        if (ImGui::IsKeyPressed(ImGuiKey_3) || ImGui::IsKeyPressed(ImGuiKey_Keypad3)) {
+            _cameraController->switchToView(glm::vec3(1, 0, 0));
+        }
+        // Key 7: Top View (+Y)
+        if (ImGui::IsKeyPressed(ImGuiKey_7) || ImGui::IsKeyPressed(ImGuiKey_Keypad7)) {
+            _cameraController->switchToView(glm::vec3(0, 1, 0));
+        }
+
+        // Delete
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete) && selectedObject)
+        {
+            if (scene) scene->markForDestruction(selectedObject);
+            selectedObject = nullptr; 
+        }
     }
 
-    // Delete
-    if (ImGui::IsKeyPressed(ImGuiKey_Delete) && selectedObject)
-    {
-        if (scene) scene->markForDestruction(selectedObject);
-        selectedObject = nullptr; 
-    }
-
-    if (_isHovered || _isFocused || _isControlling) {
+    if (_isHovered || _isControlling) {
         _cameraController->handleInput(); 
     }
     _cameraController->update(dt);
@@ -5556,7 +5782,7 @@ void Renderer::init() {
         }
     )";
 
-    // 片元着色器 (Fragment Shader) - Blinn-Phong 多光源版本
+    // 片元着色器 (Fragment Shader)
     const char *fsCode = R"(
         #version 330 core
         #extension GL_ARB_shader_texture_lod : enable
@@ -5583,28 +5809,42 @@ void Renderer::init() {
 
         uniform Material material;
 
-        // 纹理
+        // 基础纹理
         uniform sampler2D diffuseMap; 
         uniform bool hasDiffuseMap;
+
+        // 纹理变换
         uniform bool useTriplanar;
         uniform float triplanarScale;
         uniform vec3 triRotPos; // x,y,z 对应 +X,+Y,+Z 面的角度
         uniform vec3 triRotNeg; // x,y,z 对应 -X,-Y,-Z 面的角度
         uniform vec3 triFlipPos;
         uniform vec3 triFlipNeg;
+
         // 法线贴图
         uniform sampler2D normalMap;
         uniform bool hasNormalMap;
         uniform float normalStrength; // 默认 1.0
         uniform bool flipNormalY;     // 默认 false
+
         // ORM 贴图
         uniform sampler2D ormMap;
         uniform bool hasOrmMap;
+
+        // ORM 独立贴图
+        uniform sampler2D aoMap;
+        uniform bool hasAoMap;
+        uniform sampler2D roughnessMap;
+        uniform bool hasRoughnessMap;
+        uniform sampler2D metallicMap;
+        uniform bool hasMetallicMap;
+
         // 自发光贴图
         uniform sampler2D emissiveMap;
         uniform bool hasEmissiveMap;
         uniform vec3 emissiveColor;
         uniform float emissiveStrength;
+
         // 透明度贴图
         uniform sampler2D opacityMap;
         uniform bool hasOpacityMap;
@@ -5897,10 +6137,12 @@ void Renderer::init() {
             
             vec3 viewDir = normalize(viewPos - FragPos);
 
+            // 层级 1: 默认值 (滑块)
             float roughness = material.roughness;
             float metallic  = material.metallic;
             float ao        = material.ao;
-
+            
+            // 层级 2: ORM 贴图
             if (hasOrmMap) {
                 vec4 ormSample;
                 if (useTriplanar) {
@@ -5916,6 +6158,20 @@ void Renderer::init() {
                 ao        = ormSample.r;
                 roughness = ormSample.g;
                 metallic  = ormSample.b;
+            }
+
+            // 层级 3: 独立通道贴图
+            if (hasAoMap) {
+                if (useTriplanar) ao = SampleTriplanar(aoMap, triData).r;
+                else ao = texture(aoMap, TexCoord).r;
+            }
+            if (hasRoughnessMap) {
+                if (useTriplanar) roughness = SampleTriplanar(roughnessMap, triData).r;
+                else roughness = texture(roughnessMap, TexCoord).r;
+            }
+            if (hasMetallicMap) {
+                if (useTriplanar) metallic = SampleTriplanar(metallicMap, triData).r;
+                else metallic = texture(metallicMap, TexCoord).r;
             }
             
             // ================= PBR 参数准备 =================
@@ -6545,6 +6801,11 @@ void Renderer::init() {
     _mainShader->setUniformInt("ormMap", 4);      // Slot 4: ORM
     _mainShader->setUniformInt("emissiveMap", 5); // Slot 5: Emissive
     _mainShader->setUniformInt("opacityMap", 6);  // Slot 6: Opacity
+
+    // 独立 ORM 通道槽位
+    _mainShader->setUniformInt("aoMap", 14);        // Slot 14
+    _mainShader->setUniformInt("roughnessMap", 15); // Slot 15
+    _mainShader->setUniformInt("metallicMap", 16);  // Slot 16
 
 
     // Slot 7,8,9,10 用于点光源阴影
@@ -7833,6 +8094,36 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         } else {
             _mainShader->setUniformBool("hasOrmMap", false);
             glActiveTexture(GL_TEXTURE8);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
+        // AO Map -> Slot 14
+        if (meshComp->aoMap) {
+            meshComp->aoMap->bind(14);
+            _mainShader->setUniformBool("hasAoMap", true);
+        } else {
+            _mainShader->setUniformBool("hasAoMap", false);
+            glActiveTexture(GL_TEXTURE14);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
+        // Roughness Map -> Slot 15
+        if (meshComp->roughnessMap) {
+            meshComp->roughnessMap->bind(15);
+            _mainShader->setUniformBool("hasRoughnessMap", true);
+        } else {
+            _mainShader->setUniformBool("hasRoughnessMap", false);
+            glActiveTexture(GL_TEXTURE15);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
+        // Metallic Map -> Slot 16
+        if (meshComp->metallicMap) {
+            meshComp->metallicMap->bind(16);
+            _mainShader->setUniformBool("hasMetallicMap", true);
+        } else {
+            _mainShader->setUniformBool("hasMetallicMap", false);
+            glActiveTexture(GL_TEXTURE16);
             glBindTexture(GL_TEXTURE_2D, 0);
         }
 
@@ -9250,6 +9541,12 @@ public:
     std::shared_ptr<ImageTexture2D> diffuseMap; // 漫反射贴图
     std::shared_ptr<ImageTexture2D> normalMap; // 法线贴图
     std::shared_ptr<ImageTexture2D> ormMap; // ORM 贴图 (R=AO, G=Roughness, B=Metallic)
+    
+    // 优先级逻辑：独立贴图 > ORM贴图 > 纯数值
+    std::shared_ptr<ImageTexture2D> aoMap;        // 独立环境光遮蔽 (Ambient Occlusion)
+    std::shared_ptr<ImageTexture2D> roughnessMap; // 独立粗糙度 (Roughness)
+    std::shared_ptr<ImageTexture2D> metallicMap;  // 独立金属度 (Metallic)
+
     std::shared_ptr<ImageTexture2D> emissiveMap; // 自发光贴图
     std::shared_ptr<ImageTexture2D> opacityMap; // 透明度贴图
     Material material;

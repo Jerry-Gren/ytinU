@@ -115,6 +115,12 @@ public:
     std::shared_ptr<ImageTexture2D> diffuseMap; // 漫反射贴图
     std::shared_ptr<ImageTexture2D> normalMap; // 法线贴图
     std::shared_ptr<ImageTexture2D> ormMap; // ORM 贴图 (R=AO, G=Roughness, B=Metallic)
+    
+    // 优先级逻辑：独立贴图 > ORM贴图 > 纯数值
+    std::shared_ptr<ImageTexture2D> aoMap;        // 独立环境光遮蔽 (Ambient Occlusion)
+    std::shared_ptr<ImageTexture2D> roughnessMap; // 独立粗糙度 (Roughness)
+    std::shared_ptr<ImageTexture2D> metallicMap;  // 独立金属度 (Metallic)
+
     std::shared_ptr<ImageTexture2D> emissiveMap; // 自发光贴图
     std::shared_ptr<ImageTexture2D> opacityMap; // 透明度贴图
     Material material;

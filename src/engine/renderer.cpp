@@ -81,7 +81,7 @@ void Renderer::init() {
         }
     )";
 
-    // 片元着色器 (Fragment Shader) - Blinn-Phong 多光源版本
+    // 片元着色器 (Fragment Shader)
     const char *fsCode = R"(
         #version 330 core
         #extension GL_ARB_shader_texture_lod : enable
@@ -108,28 +108,42 @@ void Renderer::init() {
 
         uniform Material material;
 
-        // 纹理
+        // 基础纹理
         uniform sampler2D diffuseMap; 
         uniform bool hasDiffuseMap;
+
+        // 纹理变换
         uniform bool useTriplanar;
         uniform float triplanarScale;
         uniform vec3 triRotPos; // x,y,z 对应 +X,+Y,+Z 面的角度
         uniform vec3 triRotNeg; // x,y,z 对应 -X,-Y,-Z 面的角度
         uniform vec3 triFlipPos;
         uniform vec3 triFlipNeg;
+
         // 法线贴图
         uniform sampler2D normalMap;
         uniform bool hasNormalMap;
         uniform float normalStrength; // 默认 1.0
         uniform bool flipNormalY;     // 默认 false
+
         // ORM 贴图
         uniform sampler2D ormMap;
         uniform bool hasOrmMap;
+
+        // ORM 独立贴图
+        uniform sampler2D aoMap;
+        uniform bool hasAoMap;
+        uniform sampler2D roughnessMap;
+        uniform bool hasRoughnessMap;
+        uniform sampler2D metallicMap;
+        uniform bool hasMetallicMap;
+
         // 自发光贴图
         uniform sampler2D emissiveMap;
         uniform bool hasEmissiveMap;
         uniform vec3 emissiveColor;
         uniform float emissiveStrength;
+
         // 透明度贴图
         uniform sampler2D opacityMap;
         uniform bool hasOpacityMap;
@@ -422,10 +436,12 @@ void Renderer::init() {
             
             vec3 viewDir = normalize(viewPos - FragPos);
 
+            // 层级 1: 默认值 (滑块)
             float roughness = material.roughness;
             float metallic  = material.metallic;
             float ao        = material.ao;
-
+            
+            // 层级 2: ORM 贴图
             if (hasOrmMap) {
                 vec4 ormSample;
                 if (useTriplanar) {
@@ -441,6 +457,20 @@ void Renderer::init() {
                 ao        = ormSample.r;
                 roughness = ormSample.g;
                 metallic  = ormSample.b;
+            }
+
+            // 层级 3: 独立通道贴图
+            if (hasAoMap) {
+                if (useTriplanar) ao = SampleTriplanar(aoMap, triData).r;
+                else ao = texture(aoMap, TexCoord).r;
+            }
+            if (hasRoughnessMap) {
+                if (useTriplanar) roughness = SampleTriplanar(roughnessMap, triData).r;
+                else roughness = texture(roughnessMap, TexCoord).r;
+            }
+            if (hasMetallicMap) {
+                if (useTriplanar) metallic = SampleTriplanar(metallicMap, triData).r;
+                else metallic = texture(metallicMap, TexCoord).r;
             }
             
             // ================= PBR 参数准备 =================
@@ -1070,6 +1100,11 @@ void Renderer::init() {
     _mainShader->setUniformInt("ormMap", 4);      // Slot 4: ORM
     _mainShader->setUniformInt("emissiveMap", 5); // Slot 5: Emissive
     _mainShader->setUniformInt("opacityMap", 6);  // Slot 6: Opacity
+
+    // 独立 ORM 通道槽位
+    _mainShader->setUniformInt("aoMap", 14);        // Slot 14
+    _mainShader->setUniformInt("roughnessMap", 15); // Slot 15
+    _mainShader->setUniformInt("metallicMap", 16);  // Slot 16
 
 
     // Slot 7,8,9,10 用于点光源阴影
@@ -2358,6 +2393,36 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         } else {
             _mainShader->setUniformBool("hasOrmMap", false);
             glActiveTexture(GL_TEXTURE8);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
+        // AO Map -> Slot 14
+        if (meshComp->aoMap) {
+            meshComp->aoMap->bind(14);
+            _mainShader->setUniformBool("hasAoMap", true);
+        } else {
+            _mainShader->setUniformBool("hasAoMap", false);
+            glActiveTexture(GL_TEXTURE14);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
+        // Roughness Map -> Slot 15
+        if (meshComp->roughnessMap) {
+            meshComp->roughnessMap->bind(15);
+            _mainShader->setUniformBool("hasRoughnessMap", true);
+        } else {
+            _mainShader->setUniformBool("hasRoughnessMap", false);
+            glActiveTexture(GL_TEXTURE15);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
+        // Metallic Map -> Slot 16
+        if (meshComp->metallicMap) {
+            meshComp->metallicMap->bind(16);
+            _mainShader->setUniformBool("hasMetallicMap", true);
+        } else {
+            _mainShader->setUniformBool("hasMetallicMap", false);
+            glActiveTexture(GL_TEXTURE16);
             glBindTexture(GL_TEXTURE_2D, 0);
         }
 
