@@ -702,6 +702,19 @@ void InspectorPanel::drawComponentUI(Component *comp)
                     ImGui::EndCombo();
                 }
                 ImGui::DragFloat("IOR", &mesh->material.refractionIndex, 0.01f, 1.0f, 3.0f);
+
+                // 模式切换
+                const char* refModes[] = { "Thin", "Solid" };
+                int currentMode = mesh->isSolidGlass ? 1 : 0;
+                if (ImGui::Combo("Mode", &currentMode, refModes, 2)) {
+                    mesh->isSolidGlass = (currentMode == 1);
+                }
+
+                if (mesh->isSolidGlass) {
+                    // 只有实体模式才显示吸收参数
+                    ImGui::DragFloat("Density", &mesh->attenuationColor, 0.1f, 0.0f, 20.0f);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Controls how dark the glass gets as it gets thicker (Beer's Law).");
+                }
             }
 
             ImGui::TreePop();

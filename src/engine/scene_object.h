@@ -161,6 +161,11 @@ public:
     // 透明的贴图设置
     float alphaCutoff = 0.5f; // 低于此值的像素将被丢弃
 
+    // 折射高级控制
+    bool isSolidGlass = false;      // false = 薄壁模式(窗户), true = 实体模式(水晶)
+    float attenuationColor = 0.0f;  // 吸收浓度 (0 = 不变黑, 越大越黑)
+    float attenuationDist = 1.0f;   // 衰减距离 (光线走多远会变色)
+
     MeshShapeType shapeType = MeshShapeType::Cube;
     MeshParams params;
 

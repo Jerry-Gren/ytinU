@@ -157,7 +157,19 @@ void Renderer::init() {
         uniform float iblIntensity;
 
         // 屏幕空间折射相关
-        uniform sampler2D sceneBackground;
+        uniform sampler2D sceneBackground; // Slot 3: Color
+        uniform sampler2D sceneDepth;      // Slot 10: Depth
+
+        // 背面深度图
+        uniform sampler2D backfaceDepthMap; // Slot 17: Back Depth
+        
+        // 相机参数
+        uniform float zNear;
+        uniform float zFar;
+
+        uniform bool isSolidGlass;
+        uniform float absorbanceDensity;
+        
         uniform vec2 screenSize;
         uniform mat4 view;
 
@@ -340,6 +352,12 @@ void Renderer::init() {
             return specularColor * AB.x + AB.y;
         }
 
+        // 7. 线性化深度 (0-1 -> View Space Units)
+        float LinearizeDepth(float depth) {
+            float z = depth * 2.0 - 1.0; // Back to NDC 
+            return (2.0 * zNear * zFar) / (zFar + zNear - z * (zFar - zNear));
+        }
+
         // 函数声明
         vec4 getTriplanarSample(vec3 worldPos, vec3 normal);
 
@@ -358,7 +376,7 @@ void Renderer::init() {
         vec4 SampleTriplanar(sampler2D theMap, TriplanarData data);
         vec3 SampleTriplanarNormal(sampler2D normMap, TriplanarData data, vec3 worldNormal);
 
-        vec3 ComputeRefraction(vec2 screenUV, vec3 normalWS, float ior, float roughness);
+        vec3 ComputeRefraction(vec2 screenUV, vec3 normalWS, float ior, float roughness, float surfaceZ, float thickness);
 
 		// 获取法线辅助函数
 		vec3 getNormal() {
@@ -553,41 +571,69 @@ void Renderer::init() {
 
             if (material.transparency > 0.001) 
             {
-                // A. 菲涅尔 (Fresnel) - 控制反射强度
+                // A. 菲涅尔
                 vec3 F0_Glass = vec3(0.04); 
-                // 允许 albedo 稍微影响 F0 (虽然物理上不准确，但对有色玻璃好看)
-                // F0_Glass = mix(F0_Glass, material.albedo, 0.5); 
-
                 float cosTheta = clamp(dot(norm, viewDir), 0.0, 1.0);
                 vec3 F = FresnelSchlickRoughness(cosTheta, F0_Glass, roughness);
-                
-                // 叠加 reflectvity 参数
                 float fScalar = clamp(F.r + material.reflectivity, 0.0, 1.0);
 
-                // B. 反射部分 (Reflection) - 必须包含 IBL 和 直接光高光
+                // B. 反射
                 vec3 R = reflect(-viewDir, norm);
                 
-                // [关键修正] 这里的 prefilterMap 采样必须确保有值
-                // 如果没有 ReflectionProbe，这里应该采样全局 Skybox IBL
-                vec3 reflectionColor = textureLod(prefilterMap, R, roughness * 4.0).rgb * iblIntensity;
+                // 视差校正
+                vec3 correctedR = R;
+                if (probeBoxMax != probeBoxMin) {
+                    correctedR = BoxProjectedCubemapDirection(FragPos, R, probePos, probeBoxMin, probeBoxMax);
+                }
+                vec3 reflectionColor = textureLod(prefilterMap, correctedR, roughness * 4.0).rgb * iblIntensity * 0.5;
                 reflectionColor += directSpecular; 
 
-                // C. 折射部分 (Refraction)
+                // C. 折射 (双面物理模拟)
                 vec2 screenUV = gl_FragCoord.xy / screenSize;
-                // 防止 UV 越界
-                screenUV = clamp(screenUV, 0.001, 0.999);
-
-                vec3 transmissionColor = ComputeRefraction(screenUV, norm, material.refractionIndex, roughness);
+                vec3 transmissionColor;
+                float thickness = 0.0;
                 
-                // 玻璃染色
-                transmissionColor *= material.albedo;
+                if (isSolidGlass) 
+                {
+                    // === 实体模式 (Solid) ===
+                    // 采样背面深度图计算物理厚度
+                    float backZ = texture(backfaceDepthMap, screenUV).r;
+                    if(backZ >= 0.999) backZ = gl_FragCoord.z + 0.01; 
+
+                    // 深度修正 (处理内部物体)
+                    float opaqueZ = textureLod(sceneDepth, screenUV, 0.0).r;
+                    float effectiveZ = backZ;
+                    if (opaqueZ < backZ && opaqueZ > gl_FragCoord.z) {
+                        effectiveZ = opaqueZ;
+                    }
+
+                    float linFront = LinearizeDepth(gl_FragCoord.z);
+                    float linBack  = LinearizeDepth(effectiveZ);
+                    thickness = max(linBack - linFront, 0.0);
+                }
+                else 
+                {
+                    // === 薄壁模式 (Thin) ===
+                    // 模拟一个虚拟厚度 (Virtual Thickness)
+                    // 给一个固定值，比如 1.0 (相当于1米厚的透镜效果，单位取决于场景尺度)
+                    // 或者你可以根据模型包围盒大小传进来，这里简单设为 0.5 或 1.0
+                    thickness = 1.0; 
+                }
+
+                transmissionColor = ComputeRefraction(screenUV, norm, material.refractionIndex, roughness, gl_FragCoord.z, thickness);
+
+                // 仅 Solid 模式应用强烈的物理吸收
+                if (isSolidGlass) {
+                    vec3 absorbance = (vec3(1.0) - material.albedo) * absorbanceDensity; 
+                    vec3 transmissionFactor = exp(-absorbance * thickness);
+                    transmissionColor *= transmissionFactor;
+                } else {
+                    // Thin 模式：简单的颜色滤镜 (Tint)
+                    transmissionColor *= material.albedo;
+                }
 
                 // D. 混合
-                // 使用 fScalar 在 折射 和 反射 之间插值
                 vec3 glassBody = mix(transmissionColor, reflectionColor, fScalar);
-                
-                // 最后根据 transparency 在 "原本的不透明色" 和 "玻璃体" 之间混合
-                // 这一步是为了让 transparency=0 时平滑过渡回普通材质
                 finalColor = mix(opaqueColor, glassBody, material.transparency);
             }
 
@@ -855,7 +901,10 @@ void Renderer::init() {
         // Box Projection
         // worldPos: 当前片元的世界坐标
         // worldRefDir: 原始反射向量
+        // 将无限远的反射向量修正为局部盒子的反射向量
         vec3 BoxProjectedCubemapDirection(vec3 worldPos, vec3 worldRefDir, vec3 pPos, vec3 boxMin, vec3 boxMax) {
+            if (boxMin == boxMax) return worldRefDir;
+
             vec3 nrdir = normalize(worldRefDir);
             
             // 1. 计算射线与 Box 6个面的交点距离 (类似于 AABB 碰撞检测)
@@ -1091,31 +1140,66 @@ void Renderer::init() {
             return attenuation * window * window;
         }
 
-        // 计算背景折射颜色 (带色散)
-        // uv: 当前屏幕坐标
-        // normal: 视图空间法线 (view space normal)
-        // ior: 折射率
-        // roughness: 粗糙度
-        vec3 ComputeRefraction(vec2 screenUV, vec3 normalWS, float ior, float roughness)
+        vec3 ComputeRefraction(vec2 screenUV, vec3 normalWS, float ior, float roughness, float surfaceZ, float thickness)
         {
-            // 1. 将世界空间法线转换为观察空间法线
-            // mat3(view) 取出了旋转部分
+            // 1. 基于传入的 thickness 计算最大偏移
+            // 物理上：透镜屈光度与 (IOR-1) 和 厚度 成正比
             vec3 normalVS = mat3(view) * normalWS;
-
-            // 2. 基于观察空间法线的 XY 分量计算偏移
-            // 这种近似模拟了光线穿过凸透镜的效果
-            vec2 offset = normalVS.xy * 0.05 * (ior - 1.0);
-
-            // 3. 色散 (Chromatic Aberration)
-            float dispersion = 0.01;
             
-            // 根据粗糙度模糊背景 (Mipmap)
-            float lod = roughness * 5.0; 
+            // 系数 0.5 是经验值
+            vec2 maxOffset = normalVS.xy * thickness * 0.5 * (ior - 1.0); 
+            
+            // 限制最大偏移，防止采样过于离谱 (特别是对于虚拟厚度较大的情况)
+            float maxLimit = 0.2; 
+            if(length(maxOffset) > maxLimit) maxOffset = normalize(maxOffset) * maxLimit;
+
+            // 2. 线性光线步进 + 二分查找 (逻辑保持不变，用于解决遮挡断层)
+            int linearSteps = 10; 
+            vec2 stepSize = maxOffset / float(linearSteps);
+            vec2 currentOffset = vec2(0.0);
+            
+            vec2 lastValidOffset = vec2(0.0);
+            bool hit = false;
+
+            for(int i = 0; i < linearSteps; ++i) {
+                currentOffset += stepSize;
+                vec2 targetUV = screenUV + currentOffset;
+                float bgDepth = textureLod(sceneDepth, targetUV, 0.0).r;
+
+                // 深度校验 (防止透过前面的物体看到后面的折射)
+                if(bgDepth < surfaceZ) {
+                    hit = true;
+                    break;
+                } else {
+                    lastValidOffset = currentOffset;
+                }
+            }
+
+            if (hit) {
+                vec2 minOff = lastValidOffset;
+                vec2 maxOff = currentOffset;
+                vec2 midOff;
+                for(int i = 0; i < 5; ++i) {
+                    midOff = (minOff + maxOff) * 0.5;
+                    vec2 targetUV = screenUV + midOff;
+                    float bgDepth = textureLod(sceneDepth, targetUV, 0.0).r;
+                    if(bgDepth < surfaceZ) maxOff = midOff;
+                    else minOff = midOff;
+                }
+                currentOffset = minOff;
+            } else {
+                currentOffset = lastValidOffset;
+            }
+
+            // 3. 色散 (基于传入的 thickness)
+            // 即使是 Thin 模式，只要给虚拟厚度，也能产生漂亮的色散
+            float dispersion = 0.005 * thickness; 
+            float lod = min(roughness * 6.0, 4.0); 
 
             vec3 transmissionColor;
-            transmissionColor.r = textureLod(sceneBackground, screenUV + offset * (1.0 - dispersion), lod).r;
-            transmissionColor.g = textureLod(sceneBackground, screenUV + offset, lod).g;
-            transmissionColor.b = textureLod(sceneBackground, screenUV + offset * (1.0 + dispersion), lod).b;
+            transmissionColor.r = textureLod(sceneBackground, screenUV + currentOffset * (1.0 - dispersion), lod).r;
+            transmissionColor.g = textureLod(sceneBackground, screenUV + currentOffset, lod).g;
+            transmissionColor.b = textureLod(sceneBackground, screenUV + currentOffset * (1.0 + dispersion), lod).b;
 
             return transmissionColor;
         }
@@ -1331,6 +1415,10 @@ void Renderer::init() {
 
     // 初始大小 (随便给一个，onResize 会修正)
     initSceneColorMap(1920, 1080);
+
+    initSceneDepthMap(1920, 1080);
+
+    initBackfaceDepthMap(1920, 1080);
 }
 
 void Renderer::onResize(int width, int height) {
@@ -1338,6 +1426,8 @@ void Renderer::onResize(int width, int height) {
         _outlinePass->onResize(width, height);
     }
     initSceneColorMap(width, height);
+    initSceneDepthMap(width, height);
+    initBackfaceDepthMap(width, height);
 }
 
 void Renderer::loadSkyboxHDR(const std::string& path) {
@@ -1546,6 +1636,11 @@ void Renderer::render(const Scene& scene, Camera* camera,
             return distA > distB; // 距离大的排前面
         });
 
+    // Backface Depth Pass
+    // 必须在 Grab Pass 之前绘制，因为 Grab Pass 会切换 FBO
+    glViewport(0, 0, width, height);
+    renderBackfacePass(transparentQueue); // 绘制透明物体的背面深度
+
     // ===============================================
     // Pass 1: 主场景渲染
     // ===============================================
@@ -1576,6 +1671,22 @@ void Renderer::render(const Scene& scene, Camera* camera,
     // A. 设置全局 Uniforms (只需一次)
     setupShaderLighting(scene, view, proj, camPos, dirLights, pointLights, spotLights, lightToShadowIndex);
 
+    // 补充设置相机的 Near/Far
+    float zNear = 0.1f; 
+    float zFar = 1000.0f;
+    
+    // 尝试从 Camera 指针获取
+    if (auto pCam = dynamic_cast<PerspectiveCamera*>(camera)) {
+        zNear = pCam->znear;
+        zFar = pCam->zfar;
+    } else if (auto oCam = dynamic_cast<OrthographicCamera*>(camera)) {
+        zNear = oCam->znear;
+        zFar = oCam->zfar;
+    }
+    
+    _mainShader->setUniformFloat("zNear", zNear);
+    _mainShader->setUniformFloat("zFar", zFar);
+
     // B. 绘制不透明物体 (Opaque)
     // 它们会写入深度，遮挡后面的东西
     renderObjectList(opaqueQueue, scene);
@@ -1587,28 +1698,45 @@ void Renderer::render(const Scene& scene, Camera* camera,
 
     if (width > 0 && height > 0) // 防止最小化时崩溃
     {
-        // 1. 激活并绑定背景纹理到 Slot 3
+        // 1. 抓取颜色
         glActiveTexture(GL_TEXTURE3);
         glBindTexture(GL_TEXTURE_2D, _sceneColorMap);
-        
-        // 2. [关键] 显式设置读取缓冲
-        // 如果 targetFBO 是 0 (屏幕)，读 BACK；如果是 FBO，读 ATTACHMENT0
+
         if (targetFBO == 0) glReadBuffer(GL_BACK);
         else glReadBuffer(GL_COLOR_ATTACHMENT0);
 
-        // 3. 执行拷贝
         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
         glGenerateMipmap(GL_TEXTURE_2D); // 生成 Mipmap 以支持模糊
 
-        // 4. [修复] 必须确保 Shader 处于 Use 状态才能设置 Uniform
+        // 2. 抓取深度
+        // 将当前的 targetFBO (作为源) 的深度 Blit 到 _grabFbo (作为目标)
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, targetFBO);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, _grabFbo); // 绑定我们要写入的深度纹理容器
+
+        glBlitFramebuffer(0, 0, width, height, 
+                          0, 0, width, height, 
+                          GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, targetFBO);
+
+        // 4. 必须确保 Shader 处于 Use 状态才能设置 Uniform
         _mainShader->use();
         _mainShader->setUniformInt("sceneBackground", 3); // 告诉 Shader 去 Slot 3 找背景
+        // 绑定深度图到 Slot 10 (找个空的槽位)
+        glActiveTexture(GL_TEXTURE10);
+        glBindTexture(GL_TEXTURE_2D, _sceneDepthMap);
+        _mainShader->setUniformInt("sceneDepth", 10);     // Slot 10: Depth
         _mainShader->setUniformVec2("screenSize", glm::vec2((float)width, (float)height));
     }
 
     // D. 绘制透明物体 (Transparent)
     // 此时天空和不透明物体都画好了，玻璃可以正确混合(blend)并进行后续的背景抓取(GrabPass)
-    // (注意：GrabPass 逻辑将在下一阶段加入这里)
+    // 绑定背面深度图到 Slot 17
+    glActiveTexture(GL_TEXTURE17);
+    glBindTexture(GL_TEXTURE_2D, _sceneBackfaceDepthMap);
+    _mainShader->use();
+    _mainShader->setUniformInt("backfaceDepthMap", 17);
+    
     renderObjectList(transparentQueue, scene);
 
     // E. 辅助渲染 (Grid / Gizmos / Outline)
@@ -2226,6 +2354,68 @@ void Renderer::initSceneColorMap(int width, int height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 }
 
+void Renderer::initSceneDepthMap(int width, int height) {
+    // 1. 清理旧资源
+    if (_sceneDepthMap) glDeleteTextures(1, &_sceneDepthMap);
+    if (_grabFbo) glDeleteFramebuffers(1, &_grabFbo);
+
+    // 2. 创建深度纹理
+    glGenTextures(1, &_sceneDepthMap);
+    glBindTexture(GL_TEXTURE_2D, _sceneDepthMap);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    
+    // 设置参数：使用最近邻过滤，保证深度比较的精确性
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // 3. 创建辅助 FBO 并附加深度纹理
+    // 我们需要这个 FBO 作为 glBlitFramebuffer 的目标 (Destination)
+    glGenFramebuffers(1, &_grabFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, _grabFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, _sceneDepthMap, 0);
+    
+    // 显式告诉 OpenGL 这个 FBO 不读写颜色
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        std::cout << "ERROR::Renderer::GrabFBO Incomplete!" << std::endl;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+void Renderer::initBackfaceDepthMap(int width, int height) {
+    if (_sceneBackfaceDepthMap) glDeleteTextures(1, &_sceneBackfaceDepthMap);
+    if (_backfaceFbo) glDeleteFramebuffers(1, &_backfaceFbo);
+
+    // 1. 创建深度纹理
+    glGenTextures(1, &_sceneBackfaceDepthMap);
+    glBindTexture(GL_TEXTURE_2D, _sceneBackfaceDepthMap);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    
+    // 关键参数：边缘夹取 (Clamp)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // 2. 创建 FBO
+    glGenFramebuffers(1, &_backfaceFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, _backfaceFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, _sceneBackfaceDepthMap, 0);
+    
+    // 不读写颜色
+    glDrawBuffer(GL_NONE);
+    glReadBuffer(GL_NONE);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        std::cout << "ERROR::Renderer::BackfaceFBO Incomplete!" << std::endl;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
 void Renderer::drawSkybox(const glm::mat4& view, const glm::mat4& proj, const SceneEnvironment& env) {
     GLuint envMapToDraw = 0;
     if (env.type == SkyboxType::Procedural) {
@@ -2564,6 +2754,10 @@ void Renderer::renderObjectList(const std::vector<GameObject*>& objects, const S
         _mainShader->setUniformFloat("material.refractionIndex", meshComp->material.refractionIndex);
         _mainShader->setUniformFloat("material.transparency", meshComp->material.transparency);
 
+        _mainShader->setUniformBool("isSolidGlass", meshComp->isSolidGlass);
+        // 为了方便 Shader 计算，我们直接把用户调节的 Density 传进去作为 Absorbance
+        _mainShader->setUniformFloat("absorbanceDensity", meshComp->attenuationColor);
+
         // Triplanar
         _mainShader->setUniformBool("useTriplanar", meshComp->useTriplanar);
         _mainShader->setUniformFloat("triplanarScale", meshComp->triplanarScale);
@@ -2581,6 +2775,15 @@ void Renderer::renderObjectList(const std::vector<GameObject*>& objects, const S
         if (probe && probe->textureID != 0) {
             // 情况 A: 有局部探针 -> 用探针
             glBindTexture(GL_TEXTURE_CUBE_MAP, probe->textureID);
+
+            glm::vec3 pPos = go->transform.position;
+            // 计算世界坐标下的 AABB (Min/Max)
+            glm::vec3 bMin = pPos - probe->boxSize * 0.5f;
+            glm::vec3 bMax = pPos + probe->boxSize * 0.5f;
+
+            _mainShader->setUniformVec3("probePos", pPos);
+            _mainShader->setUniformVec3("probeBoxMin", bMin);
+            _mainShader->setUniformVec3("probeBoxMax", bMax);
         } else {
             // 情况 B: 无局部探针 -> 回退到全局
             const IBLProfile* activeProfile = nullptr;
@@ -2593,6 +2796,9 @@ void Renderer::renderObjectList(const std::vector<GameObject*>& objects, const S
                 // 极端情况：啥都没有，绑个 0 避免显示上一个物体的残影
                 glBindTexture(GL_TEXTURE_CUBE_MAP, 0); 
             }
+
+            _mainShader->setUniformVec3("probeBoxMin", glm::vec3(0.0f));
+            _mainShader->setUniformVec3("probeBoxMax", glm::vec3(0.0f));
         }
 
         // ==================================================
@@ -2613,49 +2819,51 @@ void Renderer::renderObjectList(const std::vector<GameObject*>& objects, const S
     glDisable(GL_BLEND);
 }
 
+void Renderer::renderBackfacePass(const std::vector<GameObject*>& objects)
+{
+    if (objects.empty()) return;
 
+    glBindFramebuffer(GL_FRAMEBUFFER, _backfaceFbo);
+    // 清除深度缓冲 (初始化为 1.0)
+    glClear(GL_DEPTH_BUFFER_BIT);
 
+    // [核心状态设置]
+    // 1. 关闭颜色写入 (只写深度)
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    // 2. 剔除正面 (只画背面)
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_FRONT); 
+    // 3. 深度测试开启
+    glEnable(GL_DEPTH_TEST);
 
+    // 复用 Main Shader，因为它已经绑定了 View/Projection 矩阵
+    _mainShader->use();
 
+    // 简化版绘制循环
+    for (GameObject* go : objects) 
+    {
+        auto meshComp = go->getComponent<MeshComponent>();
+        if (!meshComp || !meshComp->enabled) continue;
 
+        // 只有开启了实体模式的物体，才需要渲染背面深度！
+        // 薄壁物体不需要厚度信息，跳过
+        if (!meshComp->isSolidGlass) continue;
 
+        // 计算矩阵
+        glm::mat4 modelMatrix = go->transform.getLocalMatrix();
+        if (meshComp->model) {
+            modelMatrix = modelMatrix * meshComp->model->transform.getLocalMatrix();
+            _mainShader->setUniformMat4("model", modelMatrix);
+            // 绘制
+            meshComp->model->draw();
+        }
+    }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    // [恢复状态] 非常重要！否则后续渲染全黑
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glCullFace(GL_BACK);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
 
 void Renderer::updateReflectionProbes(const Scene& scene)
 {
