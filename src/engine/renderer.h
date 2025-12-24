@@ -75,21 +75,27 @@ private:
 
     GLuint _brdfLUT = 0; // BRDF 查找表
 
+    // 用于玻璃折射的背景纹理 (Grab Pass Texture)
+    GLuint _sceneColorMap = 0;
+
     // --- 内部绘制函数 ---
     void initSkyboxResources(); // 初始化转换用的 Shader 和 空纹理
     void initIBLResources(); // 初始化 IBL 相关的 Shader 和 Texture
-    void computeIrradianceMap(); // 执行卷积计算
     void initPrefilterResources();
-    void computePrefilterMap();
     void initBRDFResources();
     void computeBRDFLUT();
+    void initSceneColorMap(int width, int height);
     void drawSkybox(const glm::mat4& view, const glm::mat4& proj, const SceneEnvironment& env);
     void drawGrid(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos);
-    void drawSceneObjects(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, 
-                          const std::vector<LightComponent*>& dirLights,
-                          const std::vector<LightComponent*>& pointLights,
-                          const std::vector<LightComponent*>& spotLights,
-                          const std::unordered_map<LightComponent*, int>& shadowIndices,
+    // 设置 Shader 的全局光照参数 (灯光、阴影、环境贴图)
+    void setupShaderLighting(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, 
+                             const std::vector<LightComponent*>& dirLights,
+                             const std::vector<LightComponent*>& pointLights,
+                             const std::vector<LightComponent*>& spotLights,
+                             const std::unordered_map<LightComponent*, int>& shadowIndices);
+    // 渲染指定的物体列表 (通用函数)
+    void renderObjectList(const std::vector<GameObject*>& objects, 
+                          const Scene& scene, // 为了获取环境信息(exposure)等，或者你可以把exposure传给setup
                           const GameObject* excludeObject = nullptr);
     // 更新场景中的所有反射探针
     void updateReflectionProbes(const Scene& scene);

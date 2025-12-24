@@ -156,6 +156,11 @@ void Renderer::init() {
         uniform sampler2D brdfLUT;
         uniform float iblIntensity;
 
+        // 屏幕空间折射相关
+        uniform sampler2D sceneBackground;
+        uniform vec2 screenSize;
+        uniform mat4 view;
+
         // 视差校正
         uniform vec3 probePos;    // 探针拍摄时的中心位置 (世界坐标)
         uniform vec3 probeBoxMin; // 房间的最小边界 (世界坐标)
@@ -353,6 +358,8 @@ void Renderer::init() {
         vec4 SampleTriplanar(sampler2D theMap, TriplanarData data);
         vec3 SampleTriplanarNormal(sampler2D normMap, TriplanarData data, vec3 worldNormal);
 
+        vec3 ComputeRefraction(vec2 screenUV, vec3 normalWS, float ior, float roughness);
+
 		// 获取法线辅助函数
 		vec3 getNormal() {
             vec3 n = normalize(Normal);
@@ -546,44 +553,42 @@ void Renderer::init() {
 
             if (material.transparency > 0.001) 
             {
-                // 计算玻璃的 Fresnel (使用用户指定的 Reflectivity 微调 F0)
-                float glassF0 = mix(0.0, 0.5, material.reflectivity); // 注意：这里范围改小了
-                // 或者更物理一点，假设玻璃 F0 固定 0.04，Reflectivity 只控制额外增强
+                // A. 菲涅尔 (Fresnel) - 控制反射强度
                 vec3 F0_Glass = vec3(0.04); 
-                
-                float cosTheta = clamp(dot(norm, -normalize(FragPos - viewPos)), 0.0, 1.0);
-                vec3 F = FresnelSchlick(cosTheta, F0_Glass);
-                
-                // 用户 reflectivity 额外增强 Fresnel 效果 (艺术控制)
-                F += material.reflectivity * 0.5;
-                F = clamp(F, 0.0, 1.0);
+                // 允许 albedo 稍微影响 F0 (虽然物理上不准确，但对有色玻璃好看)
+                // F0_Glass = mix(F0_Glass, material.albedo, 0.5); 
 
-                // 折射与反射
-                vec3 refractColor = vec3(0.0);
-                vec3 reflectColor = vec3(0.0);
-
-                // 使用 IBL 贴图进行折射/反射
-                float k = max(material.refractionIndex, 1.0);
-                float ratio = 1.0 / k;
-                vec3 I = normalize(FragPos - viewPos);
+                float cosTheta = clamp(dot(norm, viewDir), 0.0, 1.0);
+                vec3 F = FresnelSchlickRoughness(cosTheta, F0_Glass, roughness);
                 
-                // 折射
-                vec3 R_refract = refract(I, norm, ratio);
-                refractColor = textureLod(prefilterMap, R_refract, 0.0).rgb * iblIntensity;
+                // 叠加 reflectvity 参数
+                float fScalar = clamp(F.r + material.reflectivity, 0.0, 1.0);
 
-                // 反射
-                vec3 R_reflect = reflect(I, norm);
-                reflectColor = textureLod(prefilterMap, R_reflect, material.roughness * 4.0).rgb * iblIntensity;
-
-                vec3 glassBody = mix(refractColor, reflectColor, F);
+                // B. 反射部分 (Reflection) - 必须包含 IBL 和 直接光高光
+                vec3 R = reflect(-viewDir, norm);
                 
-                // [关键] 混合: 玻璃本体 + 直接光高光 (Sun Specular)
-                // 即使玻璃是透明的，太阳照上去也应该有亮斑 (directSpecular)
-                // 而 diffuse 部分被 transparency 替换掉了
-                
-                vec3 glassResult = glassBody + directSpecular;
+                // [关键修正] 这里的 prefilterMap 采样必须确保有值
+                // 如果没有 ReflectionProbe，这里应该采样全局 Skybox IBL
+                vec3 reflectionColor = textureLod(prefilterMap, R, roughness * 4.0).rgb * iblIntensity;
+                reflectionColor += directSpecular; 
 
-                finalColor = mix(opaqueColor, glassResult, material.transparency);
+                // C. 折射部分 (Refraction)
+                vec2 screenUV = gl_FragCoord.xy / screenSize;
+                // 防止 UV 越界
+                screenUV = clamp(screenUV, 0.001, 0.999);
+
+                vec3 transmissionColor = ComputeRefraction(screenUV, norm, material.refractionIndex, roughness);
+                
+                // 玻璃染色
+                transmissionColor *= material.albedo;
+
+                // D. 混合
+                // 使用 fScalar 在 折射 和 反射 之间插值
+                vec3 glassBody = mix(transmissionColor, reflectionColor, fScalar);
+                
+                // 最后根据 transparency 在 "原本的不透明色" 和 "玻璃体" 之间混合
+                // 这一步是为了让 transparency=0 时平滑过渡回普通材质
+                finalColor = mix(opaqueColor, glassBody, material.transparency);
             }
 
             // 自发光
@@ -1085,6 +1090,35 @@ void Renderer::init() {
             
             return attenuation * window * window;
         }
+
+        // 计算背景折射颜色 (带色散)
+        // uv: 当前屏幕坐标
+        // normal: 视图空间法线 (view space normal)
+        // ior: 折射率
+        // roughness: 粗糙度
+        vec3 ComputeRefraction(vec2 screenUV, vec3 normalWS, float ior, float roughness)
+        {
+            // 1. 将世界空间法线转换为观察空间法线
+            // mat3(view) 取出了旋转部分
+            vec3 normalVS = mat3(view) * normalWS;
+
+            // 2. 基于观察空间法线的 XY 分量计算偏移
+            // 这种近似模拟了光线穿过凸透镜的效果
+            vec2 offset = normalVS.xy * 0.05 * (ior - 1.0);
+
+            // 3. 色散 (Chromatic Aberration)
+            float dispersion = 0.01;
+            
+            // 根据粗糙度模糊背景 (Mipmap)
+            float lod = roughness * 5.0; 
+
+            vec3 transmissionColor;
+            transmissionColor.r = textureLod(sceneBackground, screenUV + offset * (1.0 - dispersion), lod).r;
+            transmissionColor.g = textureLod(sceneBackground, screenUV + offset, lod).g;
+            transmissionColor.b = textureLod(sceneBackground, screenUV + offset * (1.0 + dispersion), lod).b;
+
+            return transmissionColor;
+        }
     )";
 
     _mainShader.reset(new GLSLProgram);
@@ -1294,12 +1328,16 @@ void Renderer::init() {
     // 初始化时，根据默认的程序化参数烘焙一次，防止开局全黑
     SceneEnvironment defaultEnv; // 使用默认参数
     updateProceduralSkybox(defaultEnv);
+
+    // 初始大小 (随便给一个，onResize 会修正)
+    initSceneColorMap(1920, 1080);
 }
 
 void Renderer::onResize(int width, int height) {
     if (_outlinePass) {
         _outlinePass->onResize(width, height);
     }
+    initSceneColorMap(width, height);
 }
 
 void Renderer::loadSkyboxHDR(const std::string& path) {
@@ -1402,12 +1440,11 @@ void Renderer::render(const Scene& scene, Camera* camera,
                       float contentScale,
                       GameObject* selectedObj)
 {
-    // Pass -1: 烘焙反射探针 (Bake Reflection Probes)
-    // 在渲染主画面之前，先更新场景里的“镜子”所看到的景象
+    // Pass -1: 烘焙反射探针
     updateReflectionProbes(scene);
 
     // ===============================================
-    // Pass -0.5: 阴影准备与渲染
+    // 1. 收集光源 & 准备阴影数据
     // ===============================================
     
     // 1. 收集并分类光源
@@ -1472,12 +1509,42 @@ void Renderer::render(const Scene& scene, Camera* camera,
         }
     }
 
+    // ===============================================
     // 2. 执行 Shadow Passes
+    // ===============================================
     // 渲染平行光 (CSM)
     _shadowPass->render(scene, csmCasters, camera);
     
     // 渲染点光源 (Omnidirectional)
     _pointShadowPass->render(scene, pointShadowInfos);
+
+    // ===============================================
+    // 3. 准备渲染队列 (Sorting & Culling)
+    // ===============================================
+    std::vector<GameObject*> opaqueQueue;
+    std::vector<GameObject*> transparentQueue;
+    glm::vec3 camPos = camera->transform.position;
+
+    for (const auto& go : scene.getGameObjects()) {
+        auto mesh = go->getComponent<MeshComponent>();
+        if (!mesh || !mesh->enabled) continue;
+
+        // 根据透明度参数分桶
+        if (mesh->material.transparency > 0.001f || (mesh->opacityMap != nullptr)) {
+            transparentQueue.push_back(go.get());
+        } else {
+            opaqueQueue.push_back(go.get());
+        }
+    }
+
+    // 对透明队列进行排序：从远到近 (Back-to-Front)
+    // 这样才能保证透过前面的玻璃能看到后面的玻璃
+    std::sort(transparentQueue.begin(), transparentQueue.end(), 
+        [&camPos](GameObject* a, GameObject* b) {
+            float distA = glm::distance(a->transform.position, camPos);
+            float distB = glm::distance(b->transform.position, camPos);
+            return distA > distB; // 距离大的排前面
+        });
 
     // ===============================================
     // Pass 1: 主场景渲染
@@ -1495,7 +1562,6 @@ void Renderer::render(const Scene& scene, Camera* camera,
     // 3. 准备矩阵
     glm::mat4 view = camera->getViewMatrix();
     glm::mat4 proj = camera->getProjectionMatrix();
-    glm::vec3 viewPos = camera->transform.position;
 
     // 绑定阴影纹理数组到 Slot 2
     glActiveTexture(GL_TEXTURE2);
@@ -1507,14 +1573,46 @@ void Renderer::render(const Scene& scene, Camera* camera,
         glBindTexture(GL_TEXTURE_CUBE_MAP, _pointShadowPass->getShadowMap(i));
     }
 
-    // 绘制天空盒
+    // A. 设置全局 Uniforms (只需一次)
+    setupShaderLighting(scene, view, proj, camPos, dirLights, pointLights, spotLights, lightToShadowIndex);
+
+    // B. 绘制不透明物体 (Opaque)
+    // 它们会写入深度，遮挡后面的东西
+    renderObjectList(opaqueQueue, scene);
+
+    // C. 绘制天空盒 (Skybox)
+    // [优化] 放在不透明物体之后画，利用 Early-Z 减少 Overdraw
+    // drawSkybox 内部已经设置了 glDepthFunc(GL_LEQUAL)，所以只会画在没被遮挡的地方
     drawSkybox(view, proj, scene.getEnvironment());
 
-    // 绘制场景物体 (传入收集好的光源数据)
-    drawSceneObjects(scene, view, proj, viewPos, dirLights, pointLights, spotLights, lightToShadowIndex);
+    if (width > 0 && height > 0) // 防止最小化时崩溃
+    {
+        // 1. 激活并绑定背景纹理到 Slot 3
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, _sceneColorMap);
+        
+        // 2. [关键] 显式设置读取缓冲
+        // 如果 targetFBO 是 0 (屏幕)，读 BACK；如果是 FBO，读 ATTACHMENT0
+        if (targetFBO == 0) glReadBuffer(GL_BACK);
+        else glReadBuffer(GL_COLOR_ATTACHMENT0);
 
-    // 绘制网格
-    drawGrid(view, proj, viewPos);
+        // 3. 执行拷贝
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
+        glGenerateMipmap(GL_TEXTURE_2D); // 生成 Mipmap 以支持模糊
+
+        // 4. [修复] 必须确保 Shader 处于 Use 状态才能设置 Uniform
+        _mainShader->use();
+        _mainShader->setUniformInt("sceneBackground", 3); // 告诉 Shader 去 Slot 3 找背景
+        _mainShader->setUniformVec2("screenSize", glm::vec2((float)width, (float)height));
+    }
+
+    // D. 绘制透明物体 (Transparent)
+    // 此时天空和不透明物体都画好了，玻璃可以正确混合(blend)并进行后续的背景抓取(GrabPass)
+    // (注意：GrabPass 逻辑将在下一阶段加入这里)
+    renderObjectList(transparentQueue, scene);
+
+    // E. 辅助渲染 (Grid / Gizmos / Outline)
+    drawGrid(view, proj, camPos);
 
     // 绘制描边
     if (selectedObj) {
@@ -2113,6 +2211,21 @@ void Renderer::computeBRDFLUT() {
     std::cout << "[Renderer] Computed BRDF LUT" << std::endl;
 }
 
+void Renderer::initSceneColorMap(int width, int height) {
+    if (_sceneColorMap) glDeleteTextures(1, &_sceneColorMap);
+
+    glGenTextures(1, &_sceneColorMap);
+    glBindTexture(GL_TEXTURE_2D, _sceneColorMap);
+    // 使用 RGB16F 以支持 HDR 颜色 (玻璃后的高光不应该被截断)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, width, height, 0, GL_RGB, GL_FLOAT, NULL);
+    
+    // 线性过滤 (为了让色散和模糊更平滑)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); 
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
 void Renderer::drawSkybox(const glm::mat4& view, const glm::mat4& proj, const SceneEnvironment& env) {
     GLuint envMapToDraw = 0;
     if (env.type == SkyboxType::Procedural) {
@@ -2178,12 +2291,11 @@ void Renderer::drawGrid(const glm::mat4& view, const glm::mat4& proj, const glm:
     glDisable(GL_BLEND);
 }
 
-void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, 
-                                const std::vector<LightComponent*>& dirLights,
-                                const std::vector<LightComponent*>& pointLights,
-                                const std::vector<LightComponent*>& spotLights,
-                                const std::unordered_map<LightComponent*, int>& shadowIndices,
-                                const GameObject* excludeObject)
+void Renderer::setupShaderLighting(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos,
+                                   const std::vector<LightComponent*>& dirLights,
+                                   const std::vector<LightComponent*>& pointLights,
+                                   const std::vector<LightComponent*>& spotLights,
+                                   const std::unordered_map<LightComponent*, int>& shadowIndices)
 {
     _mainShader->use();
     _mainShader->setUniformMat4("projection", proj);
@@ -2195,10 +2307,12 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
     const auto& env = scene.getEnvironment();
     _mainShader->setUniformFloat("exposure", env.globalExposure);
 
-    // 1. 设置阴影相关 Uniforms
-    _mainShader->setUniformInt("shadowMap", 2);
+    // ==================================================
+    // 1. 设置阴影相关 (Shadow Maps)
+    // ==================================================
+    _mainShader->setUniformInt("shadowMap", 2); // CSM 绑定在 Slot 2
 
-    // 传递矩阵数组
+    // 传递 CSM 矩阵数组
     const auto& matrices = _shadowPass->getLightSpaceMatrices();
     if (!matrices.empty()) {
         GLint loc = glGetUniformLocation(_mainShader->getHandle(), "lightSpaceMatrices");
@@ -2207,7 +2321,7 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         }
     }
 
-    // 传递级联分割距离
+    // 传递 CSM 级联分割距离
     const auto& levels = _shadowPass->getCascadeLevels();
     if (!levels.empty()) {
         GLint loc = glGetUniformLocation(_mainShader->getHandle(), "cascadePlaneDistances");
@@ -2217,33 +2331,31 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         _mainShader->setUniformInt("cascadeCount", (int)levels.size());
     }
 
-    // 我们假设所有灯光共享同一个 shadowBias (或者取第一个开启阴影的灯的配置)
-    // 如果想每个灯不同，需要在 shader struct 里加 bias 字段
-    // 这里简单处理，取一个默认值或第一个灯的值
+    // 设置全局 Shadow Bias (取第一个灯的配置作为参考)
     float globalBias = 0.001f;
     for(auto l : dirLights) if(l->castShadows) { globalBias = l->shadowBias; break; }
     _mainShader->setUniformFloat("shadowBias", globalBias);
 
-    // 2. Point Shadows -> Slot 7, 8, 9, 10
+    // 设置 Point Shadows -> Slot 7, 8, 9, 10
     int pointShadowSamplers[4] = {7, 8, 9, 10};
     GLint locPointMaps = glGetUniformLocation(_mainShader->getHandle(), "pointShadowMaps");
     if (locPointMaps != -1) {
-        // 传递数组
         glUniform1iv(locPointMaps, 4, pointShadowSamplers);
     }
 
-    // 传递 Far Planes (用于深度归一化)
-    // 我们需要在 shadowIndices 中查找哪些灯开启了阴影，并收集它们的 FarPlane
-    // 这里简单处理：我们在 render() 里硬编码了 50.0f，这里需要保持一致
-    // 更好的做法是将 farPlane 存在 LightComponent 或者 render() 传进来
-    float pointShadowFarPlanes[4] = {50.0f, 50.0f, 50.0f, 50.0f}; 
+    // 设置 Point Shadow Far Planes
+    float pointShadowFarPlanes[4] = {50.0f, 50.0f, 50.0f, 50.0f}; // 需与 render pass 保持一致
     GLint locFarPlanes = glGetUniformLocation(_mainShader->getHandle(), "pointShadowFarPlanes");
     if (locFarPlanes != -1) {
         glUniform1fv(locFarPlanes, 4, pointShadowFarPlanes);
     }
 
-    // 2. 提交光源数据
-    int maxDir = 4; // Shader 中定义的 NR_DIR_LIGHTS
+    // ==================================================
+    // 2. 提交光源数据 (Lights)
+    // ==================================================
+    
+    // --- Directional Lights ---
+    int maxDir = 4;
     int countDir = 0;
     for (auto light : dirLights) {
         if (countDir >= maxDir) break;
@@ -2254,17 +2366,15 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         _mainShader->setUniformVec3(base + ".color", light->color);
         _mainShader->setUniformFloat(base + ".intensity", light->intensity);
         
-        // 设置 Shadow Index
         int idx = -1;
-        if (shadowIndices.count(light)) {
-            idx = shadowIndices.at(light);
-        }
+        if (shadowIndices.count(light)) idx = shadowIndices.at(light);
         _mainShader->setUniformInt(base + ".shadowIndex", idx);
         
         countDir++;
     }
     _mainShader->setUniformInt("dirLightCount", countDir);
 
+    // --- Point Lights ---
     int maxPoint = 4;
     int countPoint = 0;
     for (auto light : pointLights) {
@@ -2279,12 +2389,11 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         if (shadowIndices.count(light)) idx = shadowIndices.at(light);
         _mainShader->setUniformInt(base + ".shadowIndex", idx);
 
-        // 即使 idx == -1 (无阴影)，也可以传进去，反正 Shader 里有 if 判断
         _mainShader->setUniformFloat(base + ".shadowStrength", light->shadowStrength);
         _mainShader->setUniformFloat(base + ".shadowRadius", light->shadowRadius);
         _mainShader->setUniformFloat(base + ".shadowBias", light->shadowBias);
         
-        // 顺便更新 Gizmo 颜色 (可选)
+        // 可选：更新 Gizmo 颜色
         if (auto mesh = light->owner->getComponent<MeshComponent>()) {
             if (mesh->isGizmo) mesh->material.albedo = light->color;
         }
@@ -2292,6 +2401,7 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
     }
     _mainShader->setUniformInt("pointLightCount", countPoint);
 
+    // --- Spot Lights ---
     int maxSpot = 4;
     int countSpot = 0;
     for (auto light : spotLights) {
@@ -2314,20 +2424,18 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
     }
     _mainShader->setUniformInt("spotLightCount", countSpot);
 
+    // ==================================================
+    // 3. 绑定 IBL 资源 (Irradiance / Prefilter / BRDF)
+    // ==================================================
     _mainShader->setUniformInt("diffuseMap", 0);
 
     const IBLProfile* activeProfile = nullptr;
-    
     if (env.type == SkyboxType::Procedural) {
-        // 程序化模式：直接使用程序化资源 (Init时已分配，Start时已烘焙)
         activeProfile = &_resProcedural;
     } else {
-        // HDR 模式：优先使用 HDR 资源，如果未就绪(没加载文件)，回退到程序化
         if (_resHDR.isBaked) activeProfile = &_resHDR;
-        // else if (_resProcedural.isBaked) activeProfile = &_resProcedural;
     }
 
-    // 绑定全局 IBL 资源
     if (activeProfile && activeProfile->isBaked) {
         // 绑定 Irradiance Map 到 Slot 11
         glActiveTexture(GL_TEXTURE11);
@@ -2345,114 +2453,108 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         _mainShader->setUniformInt("brdfLUT", 13);
 
         _mainShader->setUniformBool("hasIrradianceMap", true);
+        
+        // IBL 强度控制 (暂时硬编码，后续可移入 SceneEnvironment)
+        _mainShader->setUniformFloat("iblIntensity", 0.4f); 
     } else {
         _mainShader->setUniformBool("hasIrradianceMap", false);
     }
+}
 
-    // 3. 绘制物体 Loop
+void Renderer::renderObjectList(const std::vector<GameObject*>& objects, const Scene& scene, const GameObject* excludeObject)
+{
+    _mainShader->use();
+
+    // 开启混合以支持透明物体正确渲染
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
     glFrontFace(GL_CCW);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
 
-    for (const auto& go : scene.getGameObjects()) {
-        // 排除特定物体 (防止烘焙时自己遮挡自己)
-        if (excludeObject && go.get() == excludeObject) continue;
+    for (GameObject* go : objects) 
+    {
+        if (excludeObject && go == excludeObject) continue;
 
         auto meshComp = go->getComponent<MeshComponent>();
+        // 安全检查
         if (!meshComp || !meshComp->enabled) continue;
-        
-        auto lightComp = go->getComponent<LightComponent>();
         
         // 双面渲染处理
         if (meshComp->doubleSided) glDisable(GL_CULL_FACE);
+        else glEnable(GL_CULL_FACE);
 
-        // 纹理绑定
+        // ==================================================
+        // 1. 纹理绑定
+        // ==================================================
+        
+        // Diffuse / Albedo (Slot 0)
         if (meshComp->diffuseMap) {
-            meshComp->diffuseMap->bind(0); // Bind to Slot 0
+            meshComp->diffuseMap->bind(0);
             _mainShader->setUniformBool("hasDiffuseMap", true);
         } else {
             _mainShader->setUniformBool("hasDiffuseMap", false);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
         }
 
+        // Normal (Slot 1)
         if (meshComp->normalMap) {
-            meshComp->normalMap->bind(1); // Slot 1
+            meshComp->normalMap->bind(1);
             _mainShader->setUniformBool("hasNormalMap", true);
             _mainShader->setUniformFloat("normalStrength", meshComp->normalStrength);
             _mainShader->setUniformBool("flipNormalY", meshComp->flipNormalY);
         } else {
             _mainShader->setUniformBool("hasNormalMap", false);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, 0);
         }
 
+        // ORM (Slot 4)
         if (meshComp->ormMap) {
-            meshComp->ormMap->bind(4); // Slot 4
+            meshComp->ormMap->bind(4);
             _mainShader->setUniformBool("hasOrmMap", true);
         } else {
             _mainShader->setUniformBool("hasOrmMap", false);
-            glActiveTexture(GL_TEXTURE8);
-            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, 0);
         }
 
-        // AO Map -> Slot 14
-        if (meshComp->aoMap) {
-            meshComp->aoMap->bind(14);
-            _mainShader->setUniformBool("hasAoMap", true);
-        } else {
-            _mainShader->setUniformBool("hasAoMap", false);
-            glActiveTexture(GL_TEXTURE14);
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-
-        // Roughness Map -> Slot 15
-        if (meshComp->roughnessMap) {
-            meshComp->roughnessMap->bind(15);
-            _mainShader->setUniformBool("hasRoughnessMap", true);
-        } else {
-            _mainShader->setUniformBool("hasRoughnessMap", false);
-            glActiveTexture(GL_TEXTURE15);
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-
-        // Metallic Map -> Slot 16
-        if (meshComp->metallicMap) {
-            meshComp->metallicMap->bind(16);
-            _mainShader->setUniformBool("hasMetallicMap", true);
-        } else {
-            _mainShader->setUniformBool("hasMetallicMap", false);
-            glActiveTexture(GL_TEXTURE16);
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-
+        // Emissive (Slot 5)
         if (meshComp->emissiveMap) {
-            meshComp->emissiveMap->bind(5); // Slot 5
+            meshComp->emissiveMap->bind(5);
             _mainShader->setUniformBool("hasEmissiveMap", true);
         } else {
             _mainShader->setUniformBool("hasEmissiveMap", false);
-            glActiveTexture(GL_TEXTURE5);
-            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, 0);
         }
         _mainShader->setUniformVec3("emissiveColor", meshComp->emissiveColor);
         _mainShader->setUniformFloat("emissiveStrength", meshComp->emissiveStrength);
 
+        // Opacity (Slot 6)
         if (meshComp->opacityMap) {
-            meshComp->opacityMap->bind(6); // Slot 6
+            meshComp->opacityMap->bind(6);
             _mainShader->setUniformBool("hasOpacityMap", true);
             _mainShader->setUniformFloat("alphaCutoff", meshComp->alphaCutoff);
         } else {
             _mainShader->setUniformBool("hasOpacityMap", false);
-            glActiveTexture(GL_TEXTURE6);
-            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, 0);
         }
-        
+
+        // Independent PBR Maps (Slot 14, 15, 16)
+        if (meshComp->aoMap) { meshComp->aoMap->bind(14); _mainShader->setUniformBool("hasAoMap", true); }
+        else { _mainShader->setUniformBool("hasAoMap", false); glActiveTexture(GL_TEXTURE14); glBindTexture(GL_TEXTURE_2D, 0); }
+
+        if (meshComp->roughnessMap) { meshComp->roughnessMap->bind(15); _mainShader->setUniformBool("hasRoughnessMap", true); }
+        else { _mainShader->setUniformBool("hasRoughnessMap", false); glActiveTexture(GL_TEXTURE15); glBindTexture(GL_TEXTURE_2D, 0); }
+
+        if (meshComp->metallicMap) { meshComp->metallicMap->bind(16); _mainShader->setUniformBool("hasMetallicMap", true); }
+        else { _mainShader->setUniformBool("hasMetallicMap", false); glActiveTexture(GL_TEXTURE16); glBindTexture(GL_TEXTURE_2D, 0); }
+
+        // ==================================================
+        // 2. 材质与几何参数
+        // ==================================================
         _mainShader->setUniformBool("isUnlit", meshComp->isGizmo);
         _mainShader->setUniformBool("isDoubleSided", meshComp->doubleSided);
-        // _mainShader->setUniformVec3("material.ambient", meshComp->material.ambient);
-        // _mainShader->setUniformVec3("material.diffuse", meshComp->material.diffuse);
-        // _mainShader->setUniformVec3("material.specular", meshComp->material.specular);
-        // _mainShader->setUniformFloat("material.shininess", meshComp->material.shininess);
+        
         _mainShader->setUniformVec3("material.albedo", meshComp->material.albedo);
         _mainShader->setUniformFloat("material.metallic", meshComp->material.metallic);
         _mainShader->setUniformFloat("material.roughness", meshComp->material.roughness);
@@ -2462,65 +2564,98 @@ void Renderer::drawSceneObjects(const Scene& scene, const glm::mat4& view, const
         _mainShader->setUniformFloat("material.refractionIndex", meshComp->material.refractionIndex);
         _mainShader->setUniformFloat("material.transparency", meshComp->material.transparency);
 
+        // Triplanar
         _mainShader->setUniformBool("useTriplanar", meshComp->useTriplanar);
         _mainShader->setUniformFloat("triplanarScale", meshComp->triplanarScale);
-        glm::vec3 flipPos(
-            meshComp->triFlipPosX ? 1.0f : 0.0f,
-            meshComp->triFlipPosY ? 1.0f : 0.0f,
-            meshComp->triFlipPosZ ? 1.0f : 0.0f
-        );
-        _mainShader->setUniformVec3("triFlipPos", flipPos);
-        glm::vec3 flipNeg(
-            meshComp->triFlipNegX ? 1.0f : 0.0f,
-            meshComp->triFlipNegY ? 1.0f : 0.0f,
-            meshComp->triFlipNegZ ? 1.0f : 0.0f
-        );
-        _mainShader->setUniformVec3("triFlipNeg", flipNeg);
-        glm::vec3 rotPos(meshComp->triRotPosX, meshComp->triRotPosY, meshComp->triRotPosZ);
-        _mainShader->setUniformVec3("triRotPos", rotPos);
-        glm::vec3 rotNeg(meshComp->triRotNegX, meshComp->triRotNegY, meshComp->triRotNegZ);
-        _mainShader->setUniformVec3("triRotNeg", rotNeg);
+        _mainShader->setUniformVec3("triFlipPos", glm::vec3(meshComp->triFlipPosX, meshComp->triFlipPosY, meshComp->triFlipPosZ));
+        _mainShader->setUniformVec3("triFlipNeg", glm::vec3(meshComp->triFlipNegX, meshComp->triFlipNegY, meshComp->triFlipNegZ));
+        _mainShader->setUniformVec3("triRotPos", glm::vec3(meshComp->triRotPosX, meshComp->triRotPosY, meshComp->triRotPosZ));
+        _mainShader->setUniformVec3("triRotNeg", glm::vec3(meshComp->triRotNegX, meshComp->triRotNegY, meshComp->triRotNegZ));
 
+        // ==================================================
+        // 3. 局部反射探针 (Reflection Probe)
+        // ==================================================
         auto probe = go->getComponent<ReflectionProbeComponent>();
+        glActiveTexture(GL_TEXTURE12); // Slot 12 是 Prefilter Map
+        
         if (probe && probe->textureID != 0) {
-            // 将探针纹理绑定到 Slot 12 (Prefilter Map 槽位)
-            // 这样 Shader 里的 specular IBL 计算就会自动使用这个探针，而不是全局天空盒
-            glActiveTexture(GL_TEXTURE12);
+            // 情况 A: 有局部探针 -> 用探针
             glBindTexture(GL_TEXTURE_CUBE_MAP, probe->textureID);
-            
-            // // 计算并传递 Box 参数
-            // // 假设探针中心就是物体中心
-            // glm::vec3 pPos = go->transform.position;
-            // // 计算世界坐标下的 AABB
-            // glm::vec3 bMin = pPos - probe->boxSize * 0.5f;
-            // glm::vec3 bMax = pPos + probe->boxSize * 0.5f;
-
-            // _mainShader->setUniformVec3("probePos", pPos);
-            // _mainShader->setUniformVec3("probeBoxMin", bMin);
-            // _mainShader->setUniformVec3("probeBoxMax", bMax);
         } else {
+            // 情况 B: 无局部探针 -> 回退到全局
+            const IBLProfile* activeProfile = nullptr;
+            if (scene.getEnvironment().type == SkyboxType::Procedural) activeProfile = &_resProcedural;
+            else if (_resHDR.isBaked) activeProfile = &_resHDR; // 优先用 HDR
+            
             if (activeProfile && activeProfile->isBaked) {
-                glActiveTexture(GL_TEXTURE12);
                 glBindTexture(GL_TEXTURE_CUBE_MAP, activeProfile->prefilterMap);
+            } else {
+                // 极端情况：啥都没有，绑个 0 避免显示上一个物体的残影
+                glBindTexture(GL_TEXTURE_CUBE_MAP, 0); 
             }
         }
 
-        // IBL 强度控制
-        // 建议：如果你觉得场景太亮，这里可以传 0.5 或者 0.3
-        // 暂时硬编码为 0.5 试试，或者后续在 Inspector 里加个 Scene Settings
-        _mainShader->setUniformFloat("iblIntensity", 0.4f);
-
-        // 计算 Model Matrix
+        // ==================================================
+        // 4. 绘制调用
+        // ==================================================
         glm::mat4 modelMatrix = go->transform.getLocalMatrix();
-        modelMatrix = modelMatrix * meshComp->model->transform.getLocalMatrix();
-
-        _mainShader->setUniformMat4("model", modelMatrix);
-        
-        meshComp->model->draw();
-
-        if (meshComp->doubleSided) glEnable(GL_CULL_FACE);
+        if (meshComp->model) {
+            modelMatrix = modelMatrix * meshComp->model->transform.getLocalMatrix();
+            _mainShader->setUniformMat4("model", modelMatrix);
+            meshComp->model->draw();
+        }
     }
+
+    // 绘制结束后恢复 Cull Face
+    glEnable(GL_CULL_FACE);
+    
+    // 如果后续步骤需要关闭混合（例如阴影Pass），可以在外层处理，或者在这里恢复
+    glDisable(GL_BLEND);
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 void Renderer::updateReflectionProbes(const Scene& scene)
 {
@@ -2541,11 +2676,30 @@ void Renderer::updateReflectionProbes(const Scene& scene)
         }
     }
 
+    std::vector<GameObject*> opaqueQueue;
+    std::vector<GameObject*> transparentQueue;
+
+    // 简单的可见性判断
+    for (const auto& go : scene.getGameObjects()) {
+        auto mesh = go->getComponent<MeshComponent>();
+        if (!mesh || !mesh->enabled) continue;
+
+        if (mesh->material.transparency > 0.001f || mesh->opacityMap) {
+            transparentQueue.push_back(go.get());
+        } else {
+            opaqueQueue.push_back(go.get());
+        }
+    }
+    // 注意：反射探针对于透明物体的排序通常不需要太严格（因为是低频环境图），
+    // 但为了代码复用，如果有需要可以在这里加 sort。
+
     // 遍历所有物体，找带 ReflectionProbeComponent 的
     for (const auto& go : scene.getGameObjects())
     {
         auto probe = go->getComponent<ReflectionProbeComponent>();
         if (!probe) continue;
+
+        // if (!probe->isDirty) continue;
 
         // 1. 确保 GL 资源已创建
         probe->initGL();
@@ -2577,21 +2731,27 @@ void Renderer::updateReflectionProbes(const Scene& scene)
             // 清屏 (注意：这里不需要 glClearColor 设置太亮，否则缝隙会明显)
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            // A. 画天空盒
-            // 注意：DrawSkybox 需要去平移的 View 矩阵
+            // A. 设置全局光照参数 (注意：View 矩阵每面都不同)
+            setupShaderLighting(scene, shadowViews[i], shadowProj, probePos, 
+                                dirLights, pointLights, spotLights, emptyShadowIndices);
+
+            // B. 绘制不透明物体 (排除自己)
+            renderObjectList(opaqueQueue, scene, go.get());
+
+            // C. 绘制天空盒 (后绘优化)
             glm::mat4 viewNoTrans = glm::mat4(glm::mat3(shadowViews[i])); 
             drawSkybox(viewNoTrans, shadowProj, scene.getEnvironment());
 
-            // B. 画场景物体
-            // 关键：传入 go.get() 作为 excludeObject，防止画自己
-            drawSceneObjects(scene, shadowViews[i], shadowProj, probePos, 
-                             dirLights, pointLights, spotLights, emptyShadowIndices, 
-                             go.get());
+            // D. 绘制透明物体 (排除自己)
+            renderObjectList(transparentQueue, scene, go.get());
         }
 
         // 6个面都画完了，生成 Mipmap
         glBindTexture(GL_TEXTURE_CUBE_MAP, probe->textureID);
         glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+
+        // probe->isDirty = false;
+        // std::cout << "[Renderer] Baked Reflection Probe: " << go->name << std::endl;
     }
 
     // 恢复状态
