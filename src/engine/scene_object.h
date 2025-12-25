@@ -166,6 +166,7 @@ public:
     bool isSolidGlass = false;      // false = 薄壁模式(窗户), true = 实体模式(水晶)
     float attenuationColor = 0.0f;  // 吸收浓度 (0 = 不变黑, 越大越黑)
     float attenuationDist = 1.0f;   // 衰减距离 (光线走多远会变色)
+    float dispersion = 0.005f;      // 色散强度 (0.0 = 无色散, 0.01 = 普通玻璃, 0.05 = 钻石)
 
     MeshShapeType shapeType = MeshShapeType::Cube;
     MeshParams params;

@@ -723,6 +723,11 @@ void InspectorPanel::drawComponentUI(Component *comp)
                     ImGui::DragFloat("Density", &mesh->attenuationColor, 0.1f, 0.0f, 20.0f);
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Controls how dark the glass gets as it gets thicker (Beer's Law).");
                 }
+
+                ImGui::Separator();
+                ImGui::Text("Dispersion (Chromatic Aberration)");
+                // 范围 0.0 ~ 0.1 足够了，太大会变成万花筒
+                ImGui::SliderFloat("Spread", &mesh->dispersion, 0.0f, 0.1f, "%.4f");
             }
 
             ImGui::TreePop();

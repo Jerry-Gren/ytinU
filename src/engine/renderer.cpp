@@ -173,9 +173,11 @@ void Renderer::init() {
 
         uniform bool isSolidGlass;
         uniform float absorbanceDensity;
+        uniform float dispersion;
         
         uniform vec2 screenSize;
         uniform mat4 view;
+        uniform mat4 projection;
 
         // 视差校正
         uniform vec3 probePos;    // 探针拍摄时的中心位置 (世界坐标)
@@ -658,7 +660,7 @@ void Renderer::init() {
 
                     float linFront = LinearizeDepth(gl_FragCoord.z);
                     float linBack  = LinearizeDepth(effectiveZ);
-                    thickness = max(linBack - linFront, 0.0);
+                    thickness = max(linBack - linFront, 0.1);
                 }
                 else 
                 {
@@ -673,9 +675,42 @@ void Renderer::init() {
 
                 // 仅 Solid 模式应用强烈的物理吸收
                 if (isSolidGlass) {
-                    vec3 absorbance = (vec3(1.0) - material.albedo) * absorbanceDensity; 
-                    vec3 transmissionFactor = exp(-absorbance * thickness);
+                    // 1. 计算视线角度 (Fresnel 因子)
+                    // NdotV 越小，说明越靠近边缘 (Grazing Angle)
+                    float NdotV = clamp(dot(norm, viewDir), 0.0, 1.0);
+                    
+                    // 2. 边缘因子 (Edge Factor)
+                    // pow(..., 3.0) 使得这个效果只集中在最边缘，而不是让整个玻璃变脏
+                    float edgeFactor = pow(1.0 - NdotV, 4.0);
+
+                    // ====================================================
+                    // Hack 1: 虚拟厚度补偿 (Simulate TIR path lengthening)
+                    // ====================================================
+                    // 如果是边缘，我们假设光线在内部多弹射了几次，有效路径变长
+                    // 10.0 是一个经验倍率，你可以根据需要调整
+                    float effectiveThickness = thickness * (1.0 + edgeFactor * 3.0);
+
+                    // 计算物理吸收 (Beer's Law)
+                    // 注意：这里使用 effectiveThickness
+                    vec3 absorbance = (vec3(1.0) - material.albedo) * absorbanceDensity;
+                    vec3 transmissionFactor = exp(-absorbance * effectiveThickness);
+                    
+                    // 应用吸收
                     transmissionColor *= transmissionFactor;
+                    
+                    // ====================================================
+                    // Hack 2: 边缘颜色加深 (Edge Darkening / Tinting)
+                    // ====================================================
+                    // 真实的绿玻边缘不仅黑，而且颜色更饱和（深绿）
+                    // 我们构建一个 "Deep Tint"：让 Albedo 自身相乘 (变暗且饱和度增加)
+                    vec3 deepTint = material.albedo * material.albedo * material.albedo;
+                    
+                    // 在中心用普通 Albedo，在边缘混合进 Deep Tint
+                    // 0.5 是混合强度，保证边缘不会变成纯死黑，保留一点颜色
+                    vec3 finalTint = mix(material.albedo, deepTint, edgeFactor * 0.8);
+                    
+                    // 应用染色
+                    transmissionColor *= finalTint;
                 } else {
                     // Thin 模式：简单的颜色滤镜 (Tint)
                     transmissionColor *= material.albedo;
@@ -1193,66 +1228,65 @@ void Renderer::init() {
             return attenuation * window * window;
         }
 
+        vec2 ValidateRefraction(vec2 uv, float surfaceZ, vec2 originalUV) {
+            // 采样该位置的深度
+            float sampleDepth = textureLod(sceneDepth, uv, 0.0).r;
+
+            // [关键判断] 
+            // 如果 sampleDepth < surfaceZ (数值越小越靠近相机)，说明这是一个前景物体。
+            // 我们不能折射前景物体，所以强制回退到原始 UV (透视背景)。
+            // 0.0001 是深度容差，防止 Z-Fighting 导致的自身闪烁
+            if (sampleDepth < surfaceZ - 0.0001) {
+                return originalUV; 
+            }
+            return uv;
+        }
+
         vec3 ComputeRefraction(vec2 screenUV, vec3 normalWS, float ior, float roughness, float surfaceZ, float thickness)
         {
-            // 1. 基于传入的 thickness 计算最大偏移
-            // 物理上：透镜屈光度与 (IOR-1) 和 厚度 成正比
+            float iorR = ior - dispersion;
+            float iorG = ior;
+            float iorB = ior + dispersion;
+
             vec3 normalVS = mat3(view) * normalWS;
-            
-            // 系数 0.5 是经验值
-            vec2 maxOffset = normalVS.xy * thickness * 0.5 * (ior - 1.0); 
-            
-            // 限制最大偏移，防止采样过于离谱 (特别是对于虚拟厚度较大的情况)
-            float maxLimit = 0.2; 
-            if(length(maxOffset) > maxLimit) maxOffset = normalize(maxOffset) * maxLimit;
+            vec3 fragPosVS = vec3(view * vec4(FragPos, 1.0));
+            vec3 viewDirVS = normalize(-fragPosVS);
 
-            // 2. 线性光线步进 + 二分查找 (逻辑保持不变，用于解决遮挡断层)
-            int linearSteps = 10; 
-            vec2 stepSize = maxOffset / float(linearSteps);
-            vec2 currentOffset = vec2(0.0);
-            
-            vec2 lastValidOffset = vec2(0.0);
-            bool hit = false;
+            vec3 refractR = refract(-viewDirVS, normalVS, 1.0 / iorR);
+            vec3 refractG = refract(-viewDirVS, normalVS, 1.0 / iorG);
+            vec3 refractB = refract(-viewDirVS, normalVS, 1.0 / iorB);
 
-            for(int i = 0; i < linearSteps; ++i) {
-                currentOffset += stepSize;
-                vec2 targetUV = screenUV + currentOffset;
-                float bgDepth = textureLod(sceneDepth, targetUV, 0.0).r;
+            // --- Green Raymarch ---
+            vec3 startPos = fragPosVS;
+            vec3 endPos   = startPos + refractG * thickness; 
 
-                // 深度校验 (防止透过前面的物体看到后面的折射)
-                if(bgDepth < surfaceZ) {
-                    hit = true;
-                    break;
-                } else {
-                    lastValidOffset = currentOffset;
-                }
-            }
+            vec4 startProj = projection * vec4(startPos, 1.0);
+            vec4 endProj   = projection * vec4(endPos, 1.0);
+            vec2 startUV = (startProj.xy / startProj.w) * 0.5 + 0.5;
+            vec2 endUV   = (endProj.xy   / endProj.w)   * 0.5 + 0.5;
+            vec2 deltaUV = endUV - startUV;
 
-            if (hit) {
-                vec2 minOff = lastValidOffset;
-                vec2 maxOff = currentOffset;
-                vec2 midOff;
-                for(int i = 0; i < 5; ++i) {
-                    midOff = (minOff + maxOff) * 0.5;
-                    vec2 targetUV = screenUV + midOff;
-                    float bgDepth = textureLod(sceneDepth, targetUV, 0.0).r;
-                    if(bgDepth < surfaceZ) maxOff = midOff;
-                    else minOff = midOff;
-                }
-                currentOffset = minOff;
-            } else {
-                currentOffset = lastValidOffset;
-            }
+            // 估算红蓝偏移
+            vec2 offsetR = (refractR.xy - refractG.xy) * thickness * 0.5; 
+            vec2 offsetB = (refractB.xy - refractG.xy) * thickness * 0.5;
 
-            // 3. 色散 (基于传入的 thickness)
-            // 即使是 Thin 模式，只要给虚拟厚度，也能产生漂亮的色散
-            float dispersion = 0.005 * thickness; 
-            float lod = min(roughness * 6.0, 4.0); 
+            // 计算初始目标 UV
+            vec2 targetUV_G = screenUV + deltaUV;
+            vec2 targetUV_R = targetUV_G + offsetR;
+            vec2 targetUV_B = targetUV_G + offsetB;
 
+            // [新增步骤] 深度验证
+            // 对三个通道分别进行验证，如果任何一个通道撞到了前景，就重置该通道的 UV
+            targetUV_R = ValidateRefraction(targetUV_R, surfaceZ, screenUV);
+            targetUV_G = ValidateRefraction(targetUV_G, surfaceZ, screenUV);
+            targetUV_B = ValidateRefraction(targetUV_B, surfaceZ, screenUV);
+
+            // 最终采样
+            float lod = roughness * 5.0;
             vec3 transmissionColor;
-            transmissionColor.r = textureLod(sceneBackground, screenUV + currentOffset * (1.0 - dispersion), lod).r;
-            transmissionColor.g = textureLod(sceneBackground, screenUV + currentOffset, lod).g;
-            transmissionColor.b = textureLod(sceneBackground, screenUV + currentOffset * (1.0 + dispersion), lod).b;
+            transmissionColor.r = textureLod(sceneBackground, targetUV_R, lod).r;
+            transmissionColor.g = textureLod(sceneBackground, targetUV_G, lod).g;
+            transmissionColor.b = textureLod(sceneBackground, targetUV_B, lod).b;
 
             return transmissionColor;
         }
@@ -2877,6 +2911,7 @@ void Renderer::renderObjectList(const std::vector<GameObject*>& objects,
         _mainShader->setUniformBool("isSolidGlass", meshComp->isSolidGlass);
         // 为了方便 Shader 计算，我们直接把用户调节的 Density 传进去作为 Absorbance
         _mainShader->setUniformFloat("absorbanceDensity", meshComp->attenuationColor);
+        _mainShader->setUniformFloat("dispersion", meshComp->dispersion);
 
         // Triplanar
         _mainShader->setUniformBool("useTriplanar", meshComp->useTriplanar);
