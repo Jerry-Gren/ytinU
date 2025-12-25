@@ -1635,6 +1635,12 @@ void Renderer::render(const Scene& scene, Camera* camera,
             float distB = glm::distance(b->transform.position, camPos);
             return distA > distB; // 距离大的排前面
         });
+    
+    // 必须先更新 Shader 的 View/Proj 矩阵！
+    // 否则使用的是上一帧或 Probe 最后一次渲染的矩阵，导致深度图错位
+    _mainShader->use();
+    _mainShader->setUniformMat4("view", camera->getViewMatrix());
+    _mainShader->setUniformMat4("projection", camera->getProjectionMatrix());
 
     // Backface Depth Pass
     // 必须在 Grab Pass 之前绘制，因为 Grab Pass 会切换 FBO

@@ -298,14 +298,14 @@ void SceneRoaming::setupDockspace()
         ImGuiID dock_left_id = 0;
         ImGuiID dock_bottom_id = 0;
 
-        // 第一刀：把右边切出来 (占 20%) -> 放 Inspector
-        dock_right_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Right, 0.2f, nullptr, &dock_main_id);
+        // 第一刀：把右边切出来 (占 30%) -> 放 Inspector
+        dock_right_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Right, 0.3f, nullptr, &dock_main_id);
         
-        // 第二刀：把左边切出来 (占 20%) -> 放 Hierarchy
-        dock_left_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.2f, nullptr, &dock_main_id);
+        // 第二刀：把左边切出来 (占 25%) -> 放 Hierarchy
+        dock_left_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.25f, nullptr, &dock_main_id);
         
-        // 第三刀：把下面切出来 (占 25%) -> 放 Project
-        dock_bottom_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Down, 0.25f, nullptr, &dock_main_id);
+        // 第三刀：把下面切出来 (占 40%) -> 放 Project
+        dock_bottom_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Down, 0.4f, nullptr, &dock_main_id);
         
         // 剩下的 dock_main_id 就是中间的部分 -> 放 3D Viewport
 
