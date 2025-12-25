@@ -205,7 +205,7 @@ void SceneRoaming::renderFrame()
     {
         int w, h;
         glfwGetFramebufferSize(_window, &w, &h);
-        std::string path = ResourceManager::Get().getProjectRoot() + "/screenshot.png";
+        std::string path = ResourceManager::Get().getProjectRoot() + "screenshot.png";
         
         // 此时这一帧已经是“没有菜单”的全新一帧了
         ImageUtils::saveScreenshot(path, w, h);
@@ -515,6 +515,7 @@ void SceneRoaming::renderProjectSelector()
     if (ImGui::Button("Open / Create Project", ImVec2(confirmBtnWidth, 40)))
     {
         std::string path(_projectPathBuf);
+        std::replace(path.begin(), path.end(), '\\', '/');
         if (!std::filesystem::exists(path)) {
             std::filesystem::create_directories(path);
         }

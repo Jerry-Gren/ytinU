@@ -13,17 +13,32 @@ ResourceManager& ResourceManager::Get()
 
 void ResourceManager::setProjectRoot(const std::string& rootPath)
 {
-    _projectRoot = rootPath;
+    // 1. 路径清洗：强制将反斜杠转换为正斜杠
+    std::string cleanPath = rootPath;
+    std::replace(cleanPath.begin(), cleanPath.end(), '\\', '/');
+
+    _projectRoot = cleanPath;
     
-    // 确保路径以分隔符结尾 (Windows '\' 或 Linux '/')
-    if (!_projectRoot.empty() && _projectRoot.back() != '/' && _projectRoot.back() != '\\') {
+    // 2. 确保路径以分隔符结尾
+    if (!_projectRoot.empty() && _projectRoot.back() != '/') {
         _projectRoot += "/";
     }
 
     shutdown();
 
-    // 设置完路径后，立即重新扫描
+    // 初始扫描
+    refreshProjectDirectory();
+}
+
+void ResourceManager::refreshProjectDirectory()
+{
+    if (_projectRoot.empty()) {
+        std::cout << "[ResourceManager] Cannot refresh: Project root not set." << std::endl;
+        return;
+    }
+    std::cout << "[ResourceManager] Refreshing directory: " << _projectRoot << " ... ";
     scanDirectory(_projectRoot);
+    std::cout << "Done. Found " << _fileList.size() << " assets." << std::endl;
 }
 
 std::string ResourceManager::getFullPath(const std::string& relativePath)
@@ -40,36 +55,40 @@ void ResourceManager::scanDirectory(const std::string& rootDir)
 {
     _fileList.clear();
     namespace fs = std::filesystem;
-    if (rootDir.empty() || !fs::exists(rootDir) || !fs::is_directory(rootDir)) return;
+    try {
+        if (rootDir.empty() || !fs::exists(rootDir) || !fs::is_directory(rootDir)) return;
 
-    for (const auto& entry : fs::recursive_directory_iterator(rootDir))
-    {
-        if (entry.is_regular_file())
+        for (const auto& entry : fs::recursive_directory_iterator(rootDir))
         {
-            std::string ext = entry.path().extension().string();
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            
-            bool isModel = (ext == ".obj");
-            bool isTexture = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
-                              ext == ".bmp" || ext == ".tga" || ext == ".hdr");
-
-            if (isModel || isTexture)
+            if (entry.is_regular_file())
             {
-                std::string filename = entry.path().filename().string();
+                std::string ext = entry.path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
                 
-                std::string storePath;
-                try {
-                    // 尝试计算相对路径
-                    storePath = fs::relative(entry.path(), rootDir).string();
-                } catch (const fs::filesystem_error& e) {
-                    // 如果无法计算相对路径（比如跨盘符），则退化为存储绝对路径
-                    storePath = entry.path().string();
+                bool isModel = (ext == ".obj");
+                bool isTexture = (ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
+                                ext == ".bmp" || ext == ".tga" || ext == ".hdr");
+
+                if (isModel || isTexture)
+                {
+                    std::string filename = entry.path().filename().string();
+                    
+                    std::string storePath;
+                    try {
+                        // 尝试计算相对路径
+                        storePath = fs::relative(entry.path(), rootDir).string();
+                    } catch (const fs::filesystem_error& e) {
+                        // 如果无法计算相对路径（比如跨盘符），则退化为存储绝对路径
+                        storePath = entry.path().string();
+                    }
+                    std::replace(storePath.begin(), storePath.end(), '\\', '/');
+                    
+                    _fileList.push_back({filename, storePath});
                 }
-                std::replace(storePath.begin(), storePath.end(), '\\', '/');
-                
-                _fileList.push_back({filename, storePath});
             }
         }
+    } catch (const std::exception& e) {
+        std::cerr << "[ResourceManager] Scan failed: " << e.what() << std::endl;
     }
 }
 

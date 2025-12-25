@@ -32,6 +32,9 @@ public:
     // 获取项目根目录
     std::string getProjectRoot() const { return _projectRoot; }
 
+    // 刷新当前项目目录 (重新扫描文件)
+    void refreshProjectDirectory();
+
     // 获取完整路径 (用于加载)
     std::string getFullPath(const std::string& relativePath);
 

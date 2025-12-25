@@ -167,6 +167,9 @@ void Scene::exportToOBJ(const std::string& filename)
 
 void Scene::importScene(const std::string& filepath)
 {
+    std::string cleanPath = filepath;
+    std::replace(cleanPath.begin(), cleanPath.end(), '\\', '/');
+
     // 1. 向资源管理器请求场景资源
     // 此时 ResourceManager 会负责：
     // - 检查缓存签名
@@ -174,10 +177,10 @@ void Scene::importScene(const std::string& filepath)
     // - 自动解析 OBJ
     // - 自动将所有子网格转换为 GPU Model
     // - 自动注入 _modelCache 供后续查询
-    auto sceneRes = ResourceManager::Get().getSceneResource(filepath, false);
+    auto sceneRes = ResourceManager::Get().getSceneResource(cleanPath, false);
 
     if (!sceneRes || sceneRes->nodes.empty()) {
-        std::cout << "[Scene] Failed to load or empty scene: " << filepath << std::endl;
+        std::cout << "[Scene] Failed to load or empty scene: " << cleanPath << std::endl;
         return;
     }
 
@@ -194,7 +197,7 @@ void Scene::importScene(const std::string& filepath)
         meshComp->shapeType = MeshShapeType::CustomOBJ;
         
         // 记录路径
-        strncpy(meshComp->params.objPath, filepath.c_str(), sizeof(meshComp->params.objPath) - 1);
+        strncpy(meshComp->params.objPath, cleanPath.c_str(), sizeof(meshComp->params.objPath) - 1);
         meshComp->params.objPath[sizeof(meshComp->params.objPath) - 1] = '\0';
 
         // 记录子网格名称
@@ -212,19 +215,22 @@ void Scene::importScene(const std::string& filepath)
         _gameObjects.push_back(std::unique_ptr<GameObject>(go));
     }
 
-    std::cout << "[Scene] Instantiated " << sceneRes->nodes.size() << " objects from " << filepath << std::endl;
+    std::cout << "[Scene] Instantiated " << sceneRes->nodes.size() << " objects from " << cleanPath << std::endl;
 }
 
 void Scene::importSingleMeshFromOBJ(const std::string& filepath)
 {
+    std::string cleanPath = filepath;
+    std::replace(cleanPath.begin(), cleanPath.end(), '\\', '/');
+
     // 1. 从路径提取文件名作为物体名称 (例如 "C:/Assets/Chair.obj" -> "Chair")
-    std::string name = std::filesystem::path(filepath).stem().string();
+    std::string name = std::filesystem::path(cleanPath).stem().string();
     if (name.empty()) name = "Imported Mesh";
 
     // 通过 ResourceManager 获取模型
     // 这里的第三个参数传 "" (空字符串)，表示我们要获取“整个文件”对应的模型
     // ResourceManager 会先查缓存，如果 importScene 之前注入过 "" 对应的 Key，这里直接命中，耗时 0ms
-    std::shared_ptr<Model> model = ResourceManager::Get().getModel(filepath, false, "");
+    std::shared_ptr<Model> model = ResourceManager::Get().getModel(cleanPath, false, "");
 
     if (!model) {
         // 如果 ResourceManager 返回空，说明文件不存在或解析失败（它内部已经打印了错误日志）
@@ -241,7 +247,7 @@ void Scene::importSingleMeshFromOBJ(const std::string& filepath)
     meshComp->shapeType = MeshShapeType::CustomOBJ;
 
     // 5. 记录文件路径
-    strncpy(meshComp->params.objPath, filepath.c_str(), sizeof(meshComp->params.objPath) - 1);
+    strncpy(meshComp->params.objPath, cleanPath.c_str(), sizeof(meshComp->params.objPath) - 1);
     meshComp->params.objPath[sizeof(meshComp->params.objPath) - 1] = '\0';
 
     // Single Mesh 模式下，subMeshName 应该为空
