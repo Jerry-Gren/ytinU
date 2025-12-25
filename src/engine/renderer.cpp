@@ -1710,6 +1710,8 @@ void Renderer::render(const Scene& scene, Camera* camera,
             return distA > distB; // 距离大的排前面
         });
     
+    Frustum mainCamFrustum = camera->getFrustum();
+    
     // 必须先更新 Shader 的 View/Proj 矩阵！
     // 否则使用的是上一帧或 Probe 最后一次渲染的矩阵，导致深度图错位
     _mainShader->use();
@@ -1719,7 +1721,7 @@ void Renderer::render(const Scene& scene, Camera* camera,
     // Backface Depth Pass
     // 必须在 Grab Pass 之前绘制，因为 Grab Pass 会切换 FBO
     glViewport(0, 0, width, height);
-    renderBackfacePass(transparentQueue); // 绘制透明物体的背面深度
+    renderBackfacePass(transparentQueue, &mainCamFrustum); // 绘制透明物体的背面深度
 
     // ===============================================
     // Pass 1: 主场景渲染
@@ -1782,7 +1784,7 @@ void Renderer::render(const Scene& scene, Camera* camera,
 
     // B. 绘制不透明物体 (Opaque)
     // 它们会写入深度，遮挡后面的东西
-    renderObjectList(opaqueQueue, scene, nullptr, activeProbe, activeProbeObj);
+    renderObjectList(opaqueQueue, scene, nullptr, activeProbe, activeProbeObj, &mainCamFrustum);
 
     // C. 绘制天空盒 (Skybox)
     // [优化] 放在不透明物体之后画，利用 Early-Z 减少 Overdraw
@@ -1830,7 +1832,7 @@ void Renderer::render(const Scene& scene, Camera* camera,
     _mainShader->use();
     _mainShader->setUniformInt("backfaceDepthMap", 17);
     
-    renderObjectList(transparentQueue, scene, nullptr, activeProbe, activeProbeObj);
+    renderObjectList(transparentQueue, scene, nullptr, activeProbe, activeProbeObj, &mainCamFrustum);
 
     // E. 辅助渲染 (Grid / Gizmos / Outline)
     drawGrid(view, proj, camPos);
@@ -2748,7 +2750,8 @@ void Renderer::renderObjectList(const std::vector<GameObject*>& objects,
                                 const Scene& scene, 
                                 const GameObject* excludeObject,
                                 const ReflectionProbeComponent* activeProbe,
-                                const GameObject* activeProbeObj)
+                                const GameObject* activeProbeObj,
+                                const Frustum* frustum)
 {
     _mainShader->use();
 
@@ -2762,6 +2765,8 @@ void Renderer::renderObjectList(const std::vector<GameObject*>& objects,
 
     _mainShader->setUniformInt("planarReflectionMap", PLANAR_REFLECTION_SLOT);
 
+    // int drawCallCount = 0;
+
     for (GameObject* go : objects) 
     {
         if (excludeObject && go == excludeObject) continue;
@@ -2769,6 +2774,22 @@ void Renderer::renderObjectList(const std::vector<GameObject*>& objects,
         auto meshComp = go->getComponent<MeshComponent>();
         // 安全检查
         if (!meshComp || !meshComp->enabled) continue;
+
+        // 视锥剔除 (Frustum Culling)
+        if (frustum && meshComp->model) {
+            // 获取 Model 自身的局部包围盒
+            const BoundingBox& localBox = meshComp->model->getBoundingBox();
+            
+            // 计算完整的 Model Matrix (GameObject Transform * Mesh Local Transform)
+            glm::mat4 modelMatrix = go->transform.getLocalMatrix() * meshComp->model->transform.getLocalMatrix();
+
+            // 调用我们刚才确认过的 OBB 检测函数
+            if (!frustum->intersect(localBox, modelMatrix)) {
+                continue; // 在视锥外，跳过绘制
+            }
+        }
+
+        // drawCallCount++;
         
         // 双面渲染处理
         if (meshComp->doubleSided) glDisable(GL_CULL_FACE);
@@ -2932,6 +2953,8 @@ void Renderer::renderObjectList(const std::vector<GameObject*>& objects,
         }
     }
 
+    // if (frustum) std::cout << "Draw calls: " << drawCallCount << " / " << objects.size() << std::endl;
+
     // 绘制结束后恢复 Cull Face
     glEnable(GL_CULL_FACE);
     
@@ -2939,7 +2962,7 @@ void Renderer::renderObjectList(const std::vector<GameObject*>& objects,
     glDisable(GL_BLEND);
 }
 
-void Renderer::renderBackfacePass(const std::vector<GameObject*>& objects)
+void Renderer::renderBackfacePass(const std::vector<GameObject*>& objects, const Frustum* frustum)
 {
     if (objects.empty()) return;
 
@@ -2970,11 +2993,22 @@ void Renderer::renderBackfacePass(const std::vector<GameObject*>& objects)
         if (!meshComp->isSolidGlass) continue;
 
         // 计算矩阵
-        glm::mat4 modelMatrix = go->transform.getLocalMatrix();
-        if (meshComp->model) {
-            modelMatrix = modelMatrix * meshComp->model->transform.getLocalMatrix();
+        if (frustum && meshComp->model) {
+            const BoundingBox& localBox = meshComp->model->getBoundingBox();
+            glm::mat4 modelMatrix = go->transform.getLocalMatrix() * meshComp->model->transform.getLocalMatrix();
+            
+            if (!frustum->intersect(localBox, modelMatrix)) {
+                continue; // 跳过
+            }
+            
+            // 如果通过检测，设置矩阵并绘制
             _mainShader->setUniformMat4("model", modelMatrix);
-            // 绘制
+            meshComp->model->draw();
+        } 
+        else if (meshComp->model) // 如果没有传 frustum，回退到旧逻辑
+        {
+            glm::mat4 modelMatrix = go->transform.getLocalMatrix() * meshComp->model->transform.getLocalMatrix();
+            _mainShader->setUniformMat4("model", modelMatrix);
             meshComp->model->draw();
         }
     }
@@ -3059,19 +3093,22 @@ void Renderer::updateReflectionProbes(const Scene& scene)
             // 清屏 (注意：这里不需要 glClearColor 设置太亮，否则缝隙会明显)
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+            glm::mat4 faceVP = shadowProj * shadowViews[i]; // Proj * View
+            Frustum faceFrustum = Frustum::createFromMatrix(faceVP);
+
             // A. 设置全局光照参数 (注意：View 矩阵每面都不同)
             setupShaderLighting(scene, shadowViews[i], shadowProj, probePos, 
                                 dirLights, pointLights, spotLights, emptyShadowIndices);
 
             // B. 绘制不透明物体 (排除自己)
-            renderObjectList(opaqueQueue, scene, go.get(), nullptr, nullptr);
+            renderObjectList(opaqueQueue, scene, go.get(), nullptr, nullptr, &faceFrustum);
 
             // C. 绘制天空盒 (后绘优化)
             glm::mat4 viewNoTrans = glm::mat4(glm::mat3(shadowViews[i])); 
             drawSkybox(viewNoTrans, shadowProj, scene.getEnvironment());
 
             // D. 绘制透明物体 (排除自己)
-            renderObjectList(transparentQueue, scene, go.get(), nullptr, nullptr);
+            renderObjectList(transparentQueue, scene, go.get(), nullptr, nullptr, &faceFrustum);
         }
 
         // 6个面都画完了，生成 Mipmap

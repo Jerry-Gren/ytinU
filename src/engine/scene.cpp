@@ -47,6 +47,7 @@ void Scene::createDefaultScene()
     
     sun->transform.rotationEuler = glm::vec3(-50.0f, -30.0f, 0.0f);
     sun->transform.setRotation(sun->transform.rotationEuler);
+    sun->transform.position = glm::vec3(0.0f, 3.0f, 0.0f);
 
     // 尝试加载 Gizmo 图标
     try {

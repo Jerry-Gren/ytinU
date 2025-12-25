@@ -14,6 +14,15 @@ public:
     Plane(const glm::vec3 point, const glm::vec3& normal)
         : normal{glm::normalize(normal)}, signedDistance{-glm::dot(point, this->normal)} {}
 
+    void normalize() {
+        float len = glm::length(normal);
+        if (len > 1e-6f) {
+            float invLen = 1.0f / len;
+            normal *= invLen;
+            signedDistance *= invLen;
+        }
+    }
+
     float getSignedDistanceToPoint(glm::vec3 point) const {
         return glm::dot(normal, point) + signedDistance;
     }

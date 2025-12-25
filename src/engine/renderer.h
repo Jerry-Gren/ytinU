@@ -45,7 +45,8 @@ public:
                           const Scene& scene, 
                           const GameObject* excludeObject = nullptr,
                           const ReflectionProbeComponent* activeProbe = nullptr,
-                          const GameObject* activeProbeObj = nullptr);
+                          const GameObject* activeProbeObj = nullptr,
+                          const Frustum* frustum = nullptr);
     
     void drawSkybox(const glm::mat4& view, const glm::mat4& proj, const SceneEnvironment& env);
 
@@ -121,7 +122,7 @@ private:
                              const std::unordered_map<LightComponent*, int>& shadowIndices);
     
     // 渲染物体背面
-    void renderBackfacePass(const std::vector<GameObject*>& objects);
+    void renderBackfacePass(const std::vector<GameObject*>& objects, const Frustum* frustum);
     // 更新场景中的所有反射探针
     void updateReflectionProbes(const Scene& scene);
 };

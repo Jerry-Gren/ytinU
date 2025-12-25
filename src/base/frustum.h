@@ -3,6 +3,8 @@
 #include "bounding_box.h"
 #include "plane.h"
 #include <iostream>
+#include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 struct Frustum {
 public:
@@ -15,6 +17,63 @@ public:
         NearFace = 4,
         FarFace = 5
     };
+
+    static Frustum createFromMatrix(const glm::mat4& vp) {
+        Frustum out;
+        
+        // 矩阵的行 (或列，取决于 GLM 的内存布局，GLM 是列主序，但访问时 m[col][row])
+        // Gribb-Hartmann 方法提取平面:
+        // Left:   row4 + row1
+        // Right:  row4 - row1
+        // Bottom: row4 + row2
+        // Top:    row4 - row2
+        // Near:   row4 + row3
+        // Far:    row4 - row3
+        
+        // 为了方便，我们转置一下或者直接用行访问
+        const float* m = (const float*)glm::value_ptr(vp);
+        
+        // 辅助 lambda: 从系数构建标准化平面
+        // Ax + By + Cz + D = 0
+        auto buildPlane = [&](int index, float a, float b, float c, float d) {
+            out.planes[index].normal = glm::vec3(a, b, c);
+            out.planes[index].signedDistance = d; // 注意 plane.h 的定义，通常 d 是常数项
+            out.planes[index].normalize(); // 必须归一化才能正确计算距离
+        };
+
+        // GLM 是列主序，m[0]~m[3]是第一列。
+        // 公式通常基于行向量: P = A * V
+        // Row 1: m[0], m[4], m[8],  m[12]
+        // Row 2: m[1], m[5], m[9],  m[13]
+        // Row 3: m[2], m[6], m[10], m[14]
+        // Row 4: m[3], m[7], m[11], m[15]
+
+        // Left: w + x
+        buildPlane(LeftFace, 
+            m[3] + m[0], m[7] + m[4], m[11] + m[8], m[15] + m[12]);
+
+        // Right: w - x
+        buildPlane(RightFace, 
+            m[3] - m[0], m[7] - m[4], m[11] - m[8], m[15] - m[12]);
+
+        // Bottom: w + y
+        buildPlane(BottomFace, 
+            m[3] + m[1], m[7] + m[5], m[11] + m[9], m[15] + m[13]);
+
+        // Top: w - y
+        buildPlane(TopFace, 
+            m[3] - m[1], m[7] - m[5], m[11] - m[9], m[15] - m[13]);
+
+        // Near: w + z
+        buildPlane(NearFace, 
+            m[3] + m[2], m[7] + m[6], m[11] + m[10], m[15] + m[14]);
+
+        // Far: w - z
+        buildPlane(FarFace, 
+            m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14]);
+
+        return out;
+    }
 
     bool intersect(const BoundingBox& aabb, const glm::mat4& modelMatrix) const {
         // Judge whether the frustum intersects the bounding box

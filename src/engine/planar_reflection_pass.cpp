@@ -43,6 +43,9 @@ void PlanarReflectionPass::render(const Scene& scene, GameObject* mirrorObj, Cam
     shader->use();
     shader->setUniformMat4("view", reflectionView);
     shader->setUniformMat4("projection", reflectionProj);
+
+    glm::mat4 reflectionVP = reflectionProj * reflectionView;
+    Frustum reflectionFrustum = Frustum::createFromMatrix(reflectionVP);
     
     // 计算反射后的相机位置 (用于高光计算)
     // 简单数学：V' = V - 2*(V.N)*N (这里略过严格推导，直接用 View 矩阵逆推)
@@ -62,7 +65,7 @@ void PlanarReflectionPass::render(const Scene& scene, GameObject* mirrorObj, Cam
 
     // 9. 调用 Renderer 绘制
     // 注意：这里我们暂不处理反射里的反射 (递归)，所以 activeProbe 传空或全局
-    renderer->renderObjectList(renderQueue, scene, mirrorObj, nullptr, nullptr);
+    renderer->renderObjectList(renderQueue, scene, mirrorObj, nullptr, nullptr, &reflectionFrustum);
 
     // 10. 绘制天空盒
     // 注意：我们需要去掉 View 矩阵的位移，就像正常画天空盒一样
