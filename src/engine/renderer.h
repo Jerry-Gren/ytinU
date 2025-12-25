@@ -12,6 +12,7 @@
 #include "geometry_factory.h"
 #include "shadow_map_pass.h"
 #include "point_shadow_pass.h"
+#include "planar_reflection_pass.h"
 
 struct IBLProfile {
     GLuint envMap = 0;       // 天空盒
@@ -39,6 +40,15 @@ public:
     // 将程序自动默认的天空盒画到_envCubemap上
     void updateProceduralSkybox(const SceneEnvironment& env);
 
+    // 渲染指定的物体列表 (通用函数)
+    void renderObjectList(const std::vector<GameObject*>& objects, 
+                          const Scene& scene, 
+                          const GameObject* excludeObject = nullptr,
+                          const ReflectionProbeComponent* activeProbe = nullptr,
+                          const GameObject* activeProbeObj = nullptr);
+    
+    void drawSkybox(const glm::mat4& view, const glm::mat4& proj, const SceneEnvironment& env);
+
     // 核心渲染函数
     // targetFBO: 传入 0 渲染到屏幕，传入 FBO ID 渲染到纹理
     // selectedObj: 如果非空，则绘制描边 (Editor 模式用)
@@ -46,6 +56,12 @@ public:
                 GLuint targetFBO, int width, int height,
                 float contentScale, 
                 GameObject* selectedObj = nullptr);
+
+    GLSLProgram* getMainShader() const { return _mainShader.get(); }
+
+    // 定义反射纹理专用的纹理槽位 (Slot 18)
+    // 0-6: 基础材质, 7-10: 点光源阴影, 11-13: IBL, 14-16: ORM独立, 17: 背面深度
+    static constexpr int PLANAR_REFLECTION_SLOT = 18;
 
 private:
     // --- Shader 资源 ---
@@ -59,6 +75,7 @@ private:
     
     std::unique_ptr<ShadowMapPass> _shadowPass;
     std::unique_ptr<PointShadowPass> _pointShadowPass;
+    std::unique_ptr<PlanarReflectionPass> _planarReflectionPass;
 
     // --- 全局模型 ---
     std::shared_ptr<Model> _gridPlane;
@@ -95,7 +112,6 @@ private:
     void initSceneColorMap(int width, int height);
     void initSceneDepthMap(int width, int height);
     void initBackfaceDepthMap(int width, int height);
-    void drawSkybox(const glm::mat4& view, const glm::mat4& proj, const SceneEnvironment& env);
     void drawGrid(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos);
     // 设置 Shader 的全局光照参数 (灯光、阴影、环境贴图)
     void setupShaderLighting(const Scene& scene, const glm::mat4& view, const glm::mat4& proj, const glm::vec3& viewPos, 
@@ -103,10 +119,7 @@ private:
                              const std::vector<LightComponent*>& pointLights,
                              const std::vector<LightComponent*>& spotLights,
                              const std::unordered_map<LightComponent*, int>& shadowIndices);
-    // 渲染指定的物体列表 (通用函数)
-    void renderObjectList(const std::vector<GameObject*>& objects, 
-                          const Scene& scene, // 为了获取环境信息(exposure)等，或者你可以把exposure传给setup
-                          const GameObject* excludeObject = nullptr);
+    
     // 渲染物体背面
     void renderBackfacePass(const std::vector<GameObject*>& objects);
     // 更新场景中的所有反射探针

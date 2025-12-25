@@ -85,6 +85,7 @@ void InspectorPanel::drawComponents(GameObject* obj)
         if (comp->getType() == ComponentType::MeshRenderer) headerName = "Mesh Renderer";
         else if (comp->getType() == ComponentType::Light) headerName = "Light Source";
         else if (comp->getType() == ComponentType::ReflectionProbe) headerName = "Reflection Probe";
+        else if (comp->getType() == ComponentType::PlanarReflection) headerName = "Planar Reflection";
 
         bool isOpen = ImGui::CollapsingHeader(headerName.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
         if (isOpen)
@@ -130,6 +131,13 @@ void InspectorPanel::drawComponents(GameObject* obj)
         {
             obj->addComponent<ReflectionProbeComponent>();
         }
+
+        bool hasPlanar = obj->getComponent<PlanarReflectionComponent>() != nullptr;
+        if (ImGui::MenuItem("Planar Reflection", nullptr, false, !hasPlanar))
+        {
+            obj->addComponent<PlanarReflectionComponent>();
+        }
+
         ImGui::EndPopup();
     }
 }
@@ -822,7 +830,7 @@ void InspectorPanel::drawComponentUI(Component *comp)
         }
     }
 
-    // --- Case 3: Ref;ection Probe ---
+    // --- Case 3: Refrection Probe ---
     else if (comp->getType() == ComponentType::ReflectionProbe)
     {
         auto probe = static_cast<ReflectionProbeComponent*>(comp);
@@ -835,6 +843,30 @@ void InspectorPanel::drawComponentUI(Component *comp)
         }
 
         ImGui::TextDisabled("Real-time baked environment map");
+    }
+
+    // --- Case 4: Planar Reflection ---
+    if (comp->getType() == ComponentType::PlanarReflection)
+    {
+        auto planar = static_cast<PlanarReflectionComponent*>(comp);
+
+        // 分辨率调整 (修改后需要重新 initGL，这里简单处理，下次启动生效，或者你可以加个按钮 Re-init)
+        ImGui::InputInt("Resolution", &planar->resolution);
+        
+        // 偏移量调整
+        ImGui::DragFloat("Clip Offset", &planar->clipOffset, 0.01f, -1.0f, 1.0f);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Offset the clipping plane to fix Z-fighting or self-reflection artifacts.");
+        }
+
+        // 显示纹理预览 (调试用)
+        if (planar->textureID != 0) {
+            ImGui::Text("Reflection Map:");
+            // 翻转 UV 显示，因为 FBO 渲染出来的通常是倒的 (取决于坐标系)
+            ImGui::Image((ImTextureID)(intptr_t)planar->textureID, ImVec2(128, 128), ImVec2(0, 1), ImVec2(1, 0));
+        } else {
+            ImGui::TextDisabled("Texture not initialized (will init on render)");
+        }
     }
 }
 

@@ -34,7 +34,8 @@ enum class ComponentType
 {
     MeshRenderer,
     Light,
-    ReflectionProbe
+    ReflectionProbe,
+    PlanarReflection
 };
 
 enum class LightType
@@ -246,6 +247,32 @@ public:
     ~ReflectionProbeComponent(); // 析构移到 cpp (因为它包含 glDelete)
 
     void initGL(); // 核心逻辑移到 cpp
+    ComponentType getType() const override { return Type; }
+};
+
+// 平面反射组件
+class PlanarReflectionComponent : public Component
+{
+public:
+    static constexpr ComponentType Type = ComponentType::PlanarReflection;
+
+    // 分辨率：镜面反射通常不需要和屏幕一样大，512或1024即可
+    int resolution = 1024; 
+    
+    // 裁切平面偏移：防止镜面自身的像素遮挡住反射相机，
+    // 或者解决Z-Fighting。通常设为 0.0 或微小的负值。
+    float clipOffset = 0.0f;
+
+    // 渲染资源
+    unsigned int textureID = 0; // 颜色纹理 (Shader 采样用)
+    unsigned int fboID = 0;     // 帧缓冲
+    unsigned int rboID = 0;     // 深度缓冲 (渲染时需要深度测试)
+
+    PlanarReflectionComponent() = default;
+    ~PlanarReflectionComponent(); // 负责释放 GL 资源
+
+    void initGL(); // 初始化 FBO 和 Texture
+
     ComponentType getType() const override { return Type; }
 };
 

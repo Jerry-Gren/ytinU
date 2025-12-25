@@ -162,6 +162,10 @@ void Renderer::init() {
 
         // 背面深度图
         uniform sampler2D backfaceDepthMap; // Slot 17: Back Depth
+
+        // 平面反射相关
+        uniform sampler2D planarReflectionMap; // Slot 18
+        uniform bool usePlanarReflection;
         
         // 相机参数
         uniform float zNear;
@@ -544,10 +548,55 @@ void Renderer::init() {
                 vec3 ambientDiffuse = kD * irradiance * albedoColor;
 
                 // --- Specular IBL ---
-                // 1. Prefilter
+
+                // 准备基础反射向量
                 vec3 R = reflect(-viewDir, norm);
                 const float MAX_REFLECTION_LOD = 4.0;
-                vec3 prefilteredColor = textureLod(prefilterMap, R, roughness * MAX_REFLECTION_LOD).rgb;
+                
+                vec3 prefilteredColor;
+
+                // [新增] 分支判断：是否启用平面反射
+                if (usePlanarReflection) 
+                {
+                    // === 路径 A: 平面反射 (Planar Reflection) ===
+                    
+                    // 1. 计算屏幕空间 UV 坐标
+                    // gl_FragCoord.xy 是像素坐标 (如 1920x1080)，screenSize 是分辨率 Uniform
+                    vec2 screenUV = gl_FragCoord.xy / screenSize;
+                    
+                    // 2. 采样反射纹理 (Slot 18)
+                    vec2 reflectionUV = vec2(1.0 - screenUV.x, screenUV.y);
+                    vec3 planarColor = texture(planarReflectionMap, reflectionUV).rgb;
+                    
+                    // 3. [关键] 颜色空间转换 (sRGB -> Linear)
+                    // 因为反射图是上一帧渲染完成的画面，已经经过了 ToneMapping 和 Gamma(2.2) 处理。
+                    // 而当前的 PBR 计算是在线性空间进行的。
+                    // 如果不反转回去，反射画面会显得对比度过高且偏暗。
+                    prefilteredColor = pow(planarColor, vec3(2.2));
+                    
+                    // 4. (可选) 简单的粗糙度模拟
+                    // 平面反射通常是锐利的。如果物体材质粗糙 (roughness > 0)，
+                    // 我们可以混合一点模糊的 IBL 贴图来模拟“磨砂玻璃”效果，避免反射过于清晰导致不真实。
+                    if (roughness > 0.01) {
+                        vec3 iblBlur = textureLod(prefilterMap, R, roughness * MAX_REFLECTION_LOD).rgb;
+                        // 随着粗糙度增加，逐渐淡出清晰的平面反射，淡入模糊的 IBL
+                        prefilteredColor = mix(prefilteredColor, iblBlur, roughness);
+                    }
+                } 
+                else 
+                {
+                    // === 路径 B: 标准 IBL / 反射探针 (Standard IBL) ===
+                    // (这是你原有的逻辑)
+
+                    // 1. 视差校正 (Box Projection)
+                    vec3 correctedR = R;
+                    if (distance(probeBoxMax, probeBoxMin) > 0.001) {
+                        correctedR = BoxProjectedCubemapDirection(FragPos, R, probePos, probeBoxMin, probeBoxMax);
+                    }
+                    
+                    // 2. 采样 Prefilter Map
+                    prefilteredColor = textureLod(prefilterMap, correctedR, roughness * MAX_REFLECTION_LOD).rgb;
+                }
                 
                 // 2. BRDF LUT
                 vec2 brdf  = texture(brdfLUT, vec2(max(dot(norm, viewDir), 0.0), roughness)).rg;
@@ -582,7 +631,7 @@ void Renderer::init() {
                 
                 // 视差校正
                 vec3 correctedR = R;
-                if (probeBoxMax != probeBoxMin) {
+                if (distance(probeBoxMax, probeBoxMin) > 0.001) {
                     correctedR = BoxProjectedCubemapDirection(FragPos, R, probePos, probeBoxMin, probeBoxMax);
                 }
                 vec3 reflectionColor = textureLod(prefilterMap, correctedR, roughness * 4.0).rgb * iblIntensity * 0.5;
@@ -903,30 +952,34 @@ void Renderer::init() {
         // worldRefDir: 原始反射向量
         // 将无限远的反射向量修正为局部盒子的反射向量
         vec3 BoxProjectedCubemapDirection(vec3 worldPos, vec3 worldRefDir, vec3 pPos, vec3 boxMin, vec3 boxMax) {
-            if (boxMin == boxMax) return worldRefDir;
+            // 1. 安全检查：如果 Box 无效，回退到普通反射
+            if (distance(boxMin, boxMax) < 0.01) return worldRefDir;
 
             vec3 nrdir = normalize(worldRefDir);
             
-            // 1. 计算射线与 Box 6个面的交点距离 (类似于 AABB 碰撞检测)
+            // 2. 核心算法：计算射线与 AABB 的两个交点 (Slab Method)
+            // 我们需要找到射线射出 Box 的那个点（正向交点）
             vec3 rbmax = (boxMax - worldPos) / nrdir;
             vec3 rbmin = (boxMin - worldPos) / nrdir;
 
-            // 2. 找出正向射线的交点 (只关心反射方向那一侧的墙)
+            // 3. 挑选正向的那个平面
+            // 如果光线往 +X 走，我们关心 max.x 面；如果往 -X 走，关心 min.x 面
             vec3 rbminmax;
             rbminmax.x = (nrdir.x > 0.0) ? rbmax.x : rbmin.x;
             rbminmax.y = (nrdir.y > 0.0) ? rbmax.y : rbmin.y;
             rbminmax.z = (nrdir.z > 0.0) ? rbmax.z : rbmin.z;
 
-            // 3. 取最小的正距离 (最近的交点)
+            // 4. 取三个轴向中最近的那个交点距离 (fa = distance to intersection)
+            // 这就是射线碰到盒子内壁的距离
             float fa = min(min(rbminmax.x, rbminmax.y), rbminmax.z);
 
-            // 4. 计算交点位置
+            // 5. 计算这一点的世界坐标
             vec3 posonbox = worldPos + nrdir * fa;
 
-            // 5. 将交点转换为相对于探针中心的向量
+            // 6. 返回：从 Probe 中心 指向 碰撞点 的向量
             return posonbox - pPos;
         }
-
+        
         // CSM (平行光) 辅助变量
         vec2 poissonDisk[16] = vec2[]( 
             vec2( -0.94201624, -0.39906216 ), vec2( 0.94558609, -0.76890725 ), vec2( -0.094184101, -0.92938870 ), vec2( 0.34495938, 0.29387760 ),
@@ -1394,16 +1447,19 @@ void Renderer::init() {
     // 分辨率 1024，最大支持 4 个点光源
     _pointShadowPass = std::make_unique<PointShadowPass>(1024, 4);
 
-    // 6. 初始化天空盒资源
+    // 6. 初始化 PlanarReflectionPass
+    _planarReflectionPass = std::make_unique<PlanarReflectionPass>();
+
+    // 7. 初始化天空盒资源
     initSkyboxResources();
 
-    // 7. 
+    // 8. 
     initIBLResources();
 
-    // 8. 
+    // 9. 
     initPrefilterResources();
 
-    // 9.
+    // 10.
     initBRDFResources();
     // BRDF LUT 只需要计算一次，因为它跟环境贴图无关，只跟数学公式有关
     // 所以我们在 init 里直接计算它
@@ -1532,6 +1588,24 @@ void Renderer::render(const Scene& scene, Camera* camera,
 {
     // Pass -1: 烘焙反射探针
     updateReflectionProbes(scene);
+
+    // ===============================================
+    // Pass -0.5: 平面反射渲染 (Planar Reflection)
+    // ===============================================
+    // 遍历场景，找到所有带 PlanarReflectionComponent 的物体
+    // 必须在主场景渲染之前完成，因为主场景需要采样这些纹理
+    for (const auto& go : scene.getGameObjects())
+    {
+        // 简单的视锥剔除优化：如果镜子不在相机视野内，就不需要渲染它的反射图
+        // 这里暂时略过，直接渲染所有启用的镜子
+        if (auto planar = go->getComponent<PlanarReflectionComponent>())
+        {
+            if (planar->enabled) {
+                // 传入主相机，计算它的镜像
+                _planarReflectionPass->render(scene, go.get(), camera, this);
+            }
+        }
+    }
 
     // ===============================================
     // 1. 收集光源 & 准备阴影数据
@@ -1674,6 +1748,19 @@ void Renderer::render(const Scene& scene, Camera* camera,
         glBindTexture(GL_TEXTURE_CUBE_MAP, _pointShadowPass->getShadowMap(i));
     }
 
+    // 查找场景中激活的 Reflection Probe (暂时只支持 1 个，找第一个启用的)
+    ReflectionProbeComponent* activeProbe = nullptr;
+    GameObject* activeProbeObj = nullptr;
+
+    for (const auto& go : scene.getGameObjects()) {
+        auto probe = go->getComponent<ReflectionProbeComponent>();
+        if (probe && probe->enabled && probe->textureID != 0) {
+            activeProbe = probe;
+            activeProbeObj = go.get();
+            break; // 暂只支持一个，找到即止
+        }
+    }
+
     // A. 设置全局 Uniforms (只需一次)
     setupShaderLighting(scene, view, proj, camPos, dirLights, pointLights, spotLights, lightToShadowIndex);
 
@@ -1695,7 +1782,7 @@ void Renderer::render(const Scene& scene, Camera* camera,
 
     // B. 绘制不透明物体 (Opaque)
     // 它们会写入深度，遮挡后面的东西
-    renderObjectList(opaqueQueue, scene);
+    renderObjectList(opaqueQueue, scene, nullptr, activeProbe, activeProbeObj);
 
     // C. 绘制天空盒 (Skybox)
     // [优化] 放在不透明物体之后画，利用 Early-Z 减少 Overdraw
@@ -1743,7 +1830,7 @@ void Renderer::render(const Scene& scene, Camera* camera,
     _mainShader->use();
     _mainShader->setUniformInt("backfaceDepthMap", 17);
     
-    renderObjectList(transparentQueue, scene);
+    renderObjectList(transparentQueue, scene, nullptr, activeProbe, activeProbeObj);
 
     // E. 辅助渲染 (Grid / Gizmos / Outline)
     drawGrid(view, proj, camPos);
@@ -2657,7 +2744,11 @@ void Renderer::setupShaderLighting(const Scene& scene, const glm::mat4& view, co
     }
 }
 
-void Renderer::renderObjectList(const std::vector<GameObject*>& objects, const Scene& scene, const GameObject* excludeObject)
+void Renderer::renderObjectList(const std::vector<GameObject*>& objects, 
+                                const Scene& scene, 
+                                const GameObject* excludeObject,
+                                const ReflectionProbeComponent* activeProbe,
+                                const GameObject* activeProbeObj)
 {
     _mainShader->use();
 
@@ -2668,6 +2759,8 @@ void Renderer::renderObjectList(const std::vector<GameObject*>& objects, const S
     glFrontFace(GL_CCW);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
+
+    _mainShader->setUniformInt("planarReflectionMap", PLANAR_REFLECTION_SLOT);
 
     for (GameObject* go : objects) 
     {
@@ -2773,19 +2866,40 @@ void Renderer::renderObjectList(const std::vector<GameObject*>& objects, const S
         _mainShader->setUniformVec3("triRotNeg", glm::vec3(meshComp->triRotNegX, meshComp->triRotNegY, meshComp->triRotNegZ));
 
         // ==================================================
+        // 2.5 平面反射纹理绑定
+        // ==================================================
+        auto planarComp = go->getComponent<PlanarReflectionComponent>();
+        
+        if (planarComp && planarComp->enabled && planarComp->textureID != 0) {
+            // 绑定到 Slot 18
+            glActiveTexture(GL_TEXTURE0 + PLANAR_REFLECTION_SLOT);
+            glBindTexture(GL_TEXTURE_2D, planarComp->textureID);
+            
+            // 告诉 Shader 开启平面反射逻辑
+            _mainShader->setUniformBool("usePlanarReflection", true);
+        } else {
+            // 关闭平面反射
+            _mainShader->setUniformBool("usePlanarReflection", false);
+            
+            // 绑个 0 以防万一 (清除状态)
+            glActiveTexture(GL_TEXTURE0 + PLANAR_REFLECTION_SLOT);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
+        // ==================================================
         // 3. 局部反射探针 (Reflection Probe)
         // ==================================================
-        auto probe = go->getComponent<ReflectionProbeComponent>();
         glActiveTexture(GL_TEXTURE12); // Slot 12 是 Prefilter Map
         
-        if (probe && probe->textureID != 0) {
-            // 情况 A: 有局部探针 -> 用探针
-            glBindTexture(GL_TEXTURE_CUBE_MAP, probe->textureID);
+        if (activeProbe && activeProbe->textureID != 0 && activeProbeObj) {
+            // 情况 A: 有局部探针 -> 绑定 Probe 纹理
+            glBindTexture(GL_TEXTURE_CUBE_MAP, activeProbe->textureID);
 
-            glm::vec3 pPos = go->transform.position;
+            glm::vec3 pPos = activeProbeObj->transform.position; // 使用 Probe 对象的位置
+            
             // 计算世界坐标下的 AABB (Min/Max)
-            glm::vec3 bMin = pPos - probe->boxSize * 0.5f;
-            glm::vec3 bMax = pPos + probe->boxSize * 0.5f;
+            glm::vec3 bMin = pPos - activeProbe->boxSize * 0.5f;
+            glm::vec3 bMax = pPos + activeProbe->boxSize * 0.5f;
 
             _mainShader->setUniformVec3("probePos", pPos);
             _mainShader->setUniformVec3("probeBoxMin", bMin);
@@ -2950,14 +3064,14 @@ void Renderer::updateReflectionProbes(const Scene& scene)
                                 dirLights, pointLights, spotLights, emptyShadowIndices);
 
             // B. 绘制不透明物体 (排除自己)
-            renderObjectList(opaqueQueue, scene, go.get());
+            renderObjectList(opaqueQueue, scene, go.get(), nullptr, nullptr);
 
             // C. 绘制天空盒 (后绘优化)
             glm::mat4 viewNoTrans = glm::mat4(glm::mat3(shadowViews[i])); 
             drawSkybox(viewNoTrans, shadowProj, scene.getEnvironment());
 
             // D. 绘制透明物体 (排除自己)
-            renderObjectList(transparentQueue, scene, go.get());
+            renderObjectList(transparentQueue, scene, go.get(), nullptr, nullptr);
         }
 
         // 6个面都画完了，生成 Mipmap
